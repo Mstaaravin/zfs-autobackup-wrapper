@@ -3,7 +3,7 @@
 # Copyright (c) 2024. All rights reserved.
 #
 # Name: script_zfs-autobackup.sh
-# Version: 1.0.16
+# Version: 1.0.17
 # Author: Mstaaravin
 # Description: ZFS backup script with automated snapshot management and logging
 #             This script performs ZFS backups using zfs-autobackup tool
@@ -238,21 +238,33 @@ categorize_snapshots() {
 
 
 # Parse the output of zfs-autobackup for created and deleted snapshots
+# Fixed to correctly parse the actual zfs-autobackup output format
 parse_autobackup_output() {
     local logfile=$1
     
-    # Get counts of created and deleted snapshots
-    local created_count=$(grep -c "Creating snapshots.*-[0-9]\{14\}" "${logfile}" || echo "0")
-    local deleted_count=$(grep -c "Destroying" "${logfile}" || echo "0")
+    # Count snapshots created
+    # Pattern matches: "[Source] Creating snapshots zlhome01-20250929190001 in pool zlhome01"
+    local created_count=$(grep -c "\[Source\] Creating snapshots.*-[0-9]\{14\} in pool" "${logfile}" || echo "0")
+    
+    # Count snapshots deleted (only from Source, not Target)
+    # Pattern matches: "[Source] zlhome01/HOME.cmiranda@zlhome01-20250829214228: Destroying"
+    local deleted_count=$(grep -c "\[Source\].*@.*: Destroying" "${logfile}" || echo "0")
     
     BACKUP_STATS["snapshots_created"]="${created_count}"
     BACKUP_STATS["snapshots_deleted"]="${deleted_count}"
     
-    # Populate array for created snapshots (useful for statistics)
+    # Optional: Log the detected counts for debugging
+    log_message "Detected ${created_count} snapshots created and ${deleted_count} snapshots deleted" >> "${logfile}"
+    
+    # Populate array for created snapshots (useful for detailed statistics)
+    # Extract snapshot names from creation lines
     while read -r line; do
-        local snap_name=$(echo "${line}" | grep -o '[^ ]*-[0-9]\{14\}')
-        CREATED_SNAPSHOTS+=("${snap_name}")
-    done < <(grep "Creating snapshots.*-[0-9]\{14\}" "${logfile}" || true)
+        # Extract the snapshot name pattern: poolname-YYYYMMDDHHMMSS
+        local snap_name=$(echo "${line}" | grep -o '[a-zA-Z0-9_-]\+-[0-9]\{14\}')
+        if [ -n "${snap_name}" ]; then
+            CREATED_SNAPSHOTS+=("${snap_name}")
+        fi
+    done < <(grep "\[Source\] Creating snapshots.*-[0-9]\{14\} in pool" "${logfile}" || true)
 }
 
 
@@ -448,7 +460,7 @@ generate_summary_report() {
     categorize_snapshots "${pool}" "${logfile}"
     
     # If this was a successful backup, parse the log for additional information
-    if [ "${status}" = "COMPLETED" ]; then
+    if [[ "${status}" == *"COMPLETED"* ]]; then
         parse_autobackup_output "${logfile}"
     fi
     
