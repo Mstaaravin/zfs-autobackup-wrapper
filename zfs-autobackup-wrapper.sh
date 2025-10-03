@@ -3,7 +3,7 @@
 # Copyright (c) 2024. All rights reserved.
 #
 # Name: script_zfs-autobackup.sh
-# Version: 1.0.17
+# Version: 1.0.18
 # Author: Mstaaravin
 # Description: ZFS backup script with automated snapshot management and logging
 #             This script performs ZFS backups using zfs-autobackup tool
