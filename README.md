@@ -2,7 +2,7 @@
 
 A streamlined bash wrapper for zfs-autobackup that focuses on what zfs-autobackup doesn't provide: structured logging, log rotation, and readable reports.
 
-> **Note**: This script wraps the zfs-autobackup utility. Install it separately from: https://github.com/psy0rz/zfs_autobackup
+> **Note**This script wraps the zfs-autobackup utility. Install it separately from: https://github.com/psy0rz/zfs_autobackup
 
 ## Features
 
@@ -23,7 +23,7 @@ pipx ensurepath
 ```
 
 ### 2. SSH Configuration
-Create or edit `/root/.ssh/config`:
+Create or edit `/root/.ssh/config`: 
 ```
 Host zima01
     HostName 172.16.254.5
@@ -35,7 +35,20 @@ Host zima01
 The `aes128-gcm@openssh.com` cipher uses hardware acceleration for better transfer speeds.
 
 ### 3. ZFS Pool Configuration
-Set the autobackup property on each pool:
+We'll use this pool and its respective datasets as an example.
+```bash
+root@lhome01:~# zfs list
+NAME                        USED  AVAIL  REFER  MOUNTPOINT
+zlhome01                   2.57T   879G    24K  none
+zlhome01/HOME.cmiranda     2.34T   879G  1.92T  /home/cmiranda
+zlhome01/HOME.root         15.7G   879G  3.93G  /root
+zlhome01/etc.libvirt.qemu   640K   879G    65K  /etc/libvirt/qemu
+zlhome01/var.lib.docker     109G   879G  88.5G  /var/lib/docker
+zlhome01/var.lib.incus     17.6G   879G  4.57G  /var/lib/incus
+zlhome01/var.lib.libvirt   90.6G   879G  43.1G  /var/lib/libvirt
+```
+
+Set the autobackup property on each pool on origin server (lhome01):
 ```bash
 zfs set autobackup:poolname=true poolname
 
@@ -79,10 +92,10 @@ SOURCE_POOLS=(
 
 ```bash
 # Backup all configured pools
-./zfs-autobackup-wrapper_v1.0.19.sh
+./zfs-autobackup-wrapper.sh
 
 # Backup specific pool
-./zfs-autobackup-wrapper_v1.0.19.sh zlhome01
+./zfs-autobackup-wrapper.sh zlhome01
 ```
 
 ## Output Example
@@ -142,12 +155,12 @@ The script automatically removes old logs that don't have matching snapshots, ke
 Add to root's crontab:
 ```bash
 # Run daily at 19:00
-00 19 * * * PATH=$PATH:/root/.local/bin /root/scripts/zfs-autobackup-wrapper_v1.0.19.sh > /root/logs/cron_backup.log 2>&1
+00 19 * * * PATH=$PATH:/root/.local/bin /root/scripts/zfs-autobackup-wrapper.sh > /root/logs/cron_backup.log 2>&1
 ```
 
 Make the script executable:
 ```bash
-chmod +x /root/scripts/zfs-autobackup-wrapper_v1.0.19.sh
+chmod +x /root/scripts/zfs-autobackup-wrapper.sh
 ```
 
 ## Verification
@@ -161,7 +174,7 @@ zfs list -t snapshot zlhome01/HOME.cmiranda
 
 **Target system:**
 ```bash
-zfs list -t snapshot WD181KFGX/BACKUPS/zlhome01/HOME.cmiranda
+ssh zima01 zfs list -t snapshot WD181KFGX/BACKUPS/zlhome01/HOME.cmiranda
 ```
 
 The backup summary report provides an overview of all datasets, snapshots, and operations.
