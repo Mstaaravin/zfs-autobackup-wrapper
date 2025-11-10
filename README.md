@@ -88,6 +88,11 @@ SOURCE_POOLS=(
 )
 ```
 
+**Note on REMOTE_HOST:**
+- You can use either an SSH config hostname (e.g., `"zima01"`) or a direct IP address (e.g., `"192.168.1.100"`)
+- **Using an SSH config hostname is recommended** as it leverages the SSH config optimizations (hardware-accelerated ciphers, compression settings, etc.)
+- Using a direct IP address will work but bypasses the SSH config optimizations, resulting in slower transfer speeds
+
 ## Usage
 
 ```bash
