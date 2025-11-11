@@ -3,11 +3,19 @@
 # Copyright (c) 2024-2025. All rights reserved.
 #
 # Name: zfs-autobackup-wrapper.sh
-# Version: 1.0.19
+# Version: 1.0.21
 # Author: Mstaaravin
 # Description: Simplified ZFS backup wrapper with efficient logging and monitoring
 #             Focuses on what zfs-autobackup doesn't provide: structured logging,
 #             log rotation, and readable reports.
+#
+# Changelog v1.0.21:
+#   - Fixed double zero issue in statistics (00 -> 0)
+#   - Simplified snapshot count logic using parameter expansion
+#
+# Changelog v1.0.20:
+#   - Fixed statistics table formatting issue with snapshots_deleted value
+#   - Added newline/carriage return stripping to prevent table breaks
 #
 # Changelog v1.0.19:
 #   - Added final summary output showing pool, remote host, status, and log file
@@ -157,11 +165,13 @@ parse_autobackup_output() {
 
     # Count snapshots created
     # Pattern matches: "[Source] Creating snapshots zlhome01-20250929190001 in pool zlhome01"
-    local created_count=$(grep -c "\[Source\] Creating snapshots.*-[0-9]\{14\} in pool" "${logfile}" || echo "0")
+    local created_count=$(grep -c "\[Source\] Creating snapshots.*-[0-9]\{14\} in pool" "${logfile}" 2>/dev/null)
+    created_count=${created_count:-0}
 
     # Count snapshots deleted (only from Source, not Target)
     # Pattern matches: "[Source] zlhome01/HOME.cmiranda@zlhome01-20250829214228: Destroying"
-    local deleted_count=$(grep -c "\[Source\].*@.*: Destroying" "${logfile}" || echo "0")
+    local deleted_count=$(grep -c "\[Source\].*@.*: Destroying" "${logfile}" 2>/dev/null)
+    deleted_count=${deleted_count:-0}
 
     BACKUP_STATS["snapshots_created"]="${created_count}"
     BACKUP_STATS["snapshots_deleted"]="${deleted_count}"
@@ -297,8 +307,6 @@ generate_summary_report() {
     {
         echo
         echo "===== BACKUP SUMMARY ($(date '+%Y-%m-%d %H:%M:%S')) ====="
-        echo "POOL: ${pool}  |  Status: ${status}  |  Last backup: $(date '+%Y-%m-%d %H:%M:%S')"
-        echo "Log file: ${logfile}"
         echo
 
         # Print dataset summary table
@@ -456,7 +464,7 @@ clean_old_logs() {
 # Validates dependencies and pools
 # Processes each pool and handles failures
 main() {
-    log_message "Starting ZFS backup process (v1.0.19)"
+    log_message "Starting ZFS backup process (v1.0.21)"
     log_message "Checking dependencies..."
 
     # Verify dependencies
