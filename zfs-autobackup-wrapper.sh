@@ -3,11 +3,17 @@
 # Copyright (c) 2024-2025. All rights reserved.
 #
 # Name: zfs-autobackup-wrapper.sh
-# Version: 1.0.21
+# Version: 1.0.22
 # Author: Mstaaravin
 # Description: Simplified ZFS backup wrapper with efficient logging and monitoring
 #             Focuses on what zfs-autobackup doesn't provide: structured logging,
 #             log rotation, and readable reports.
+#
+# Changelog v1.0.22:
+#   - Add automatic hostname detection for hierarchical backup organization
+#   - Remote backups now stored as: BASEPATH/hostname/poolname
+#   - Prevents pool name collisions across multiple source hosts
+#   - Auto-create remote hostname dataset if it doesn't exist
 #
 # Changelog v1.0.21:
 #   - Fixed double zero issue in statistics (00 -> 0)
@@ -50,6 +56,10 @@ set -e
 # Requires SSH key authentication and ZFS permissions on remote host (normally using root)
 REMOTE_HOST="zima01"
 REMOTE_POOL_BASEPATH="WD181KFGX/BACKUPS"
+
+# Detect local hostname for remote backup organization
+# Creates hierarchical structure: REMOTE_POOL_BASEPATH/hostname/poolname
+LOCAL_HOSTNAME=$(hostname -s)
 
 # Basic logging configuration and date formats
 LOG_DIR="/root/logs"
@@ -355,9 +365,21 @@ log_backup() {
     log_message "- Starting backup" | tee -a "$logfile"
     log_message "- Log file: $logfile" | tee -a "$logfile"
 
+    # Ensure remote hostname dataset exists
+    local remote_base="${REMOTE_POOL_BASEPATH}/${LOCAL_HOSTNAME}"
+    if ! ssh "$REMOTE_HOST" "zfs list '$remote_base'" &>/dev/null; then
+        log_message "- Creating remote base dataset: $remote_base" | tee -a "$logfile"
+        if ! ssh "$REMOTE_HOST" "zfs create '$remote_base'"; then
+            log_message "- Failed to create remote base dataset" | tee -a "$logfile"
+            FAILED_POOLS+=("$pool")
+            return 1
+        fi
+    fi
+
     # Execute backup with full output capture
     # zfs-autobackup will handle --min-change internally and skip if no changes
-    if ! zfs-autobackup -v --clear-mountpoint --force --ssh-target "$REMOTE_HOST" "$pool" "$REMOTE_POOL_BASEPATH" > >(tee -a "$logfile") 2> >(tee -a "$temp_error_file" >&2); then
+    # Remote path includes hostname for multi-host organization: BASEPATH/hostname/poolname
+    if ! zfs-autobackup -v --clear-mountpoint --force --ssh-target "$REMOTE_HOST" "$pool" "$remote_base" > >(tee -a "$logfile") 2> >(tee -a "$temp_error_file" >&2); then
         log_message "- Backup failed" | tee -a "$logfile"
         cat "$temp_error_file" | tee -a "$logfile"
         printf '\n\n' | tee -a "$logfile"
@@ -464,7 +486,7 @@ clean_old_logs() {
 # Validates dependencies and pools
 # Processes each pool and handles failures
 main() {
-    log_message "Starting ZFS backup process (v1.0.21)"
+    log_message "Starting ZFS backup process (v1.0.22)"
     log_message "Checking dependencies..."
 
     # Verify dependencies
