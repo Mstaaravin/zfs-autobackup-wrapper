@@ -107,8 +107,6 @@ SOURCE_POOLS=(
 
 ```
 ===== BACKUP SUMMARY (2025-11-09 19:50:24) =====
-POOL: zlhome01  |  Status: ✓ COMPLETED  |  Last backup: 2025-11-09 19:50:24
-Log file: /root/logs/zlhome01_backup_20251109_1938.log
 
 DATASETS SUMMARY:
 +--------------------------------+----------------+--------------------------------+---------------+
@@ -174,12 +172,55 @@ Compare snapshots on source and target:
 
 **Source system:**
 ```bash
-zfs list -t snapshot zlhome01/HOME.cmiranda
+root@lhome01:~# zfs list -t snapshot zlhome01/HOME.cmiranda
+NAME                                             USED  AVAIL  REFER  MOUNTPOINT
+zlhome01/HOME.cmiranda@zlhome01-20250731180001  6.63G      -  1.71T  -
+zlhome01/HOME.cmiranda@zlhome01-20250810190001  5.67G      -  1.71T  -
+zlhome01/HOME.cmiranda@zlhome01-20250909190001  42.0G      -  2.01T  -
+zlhome01/HOME.cmiranda@zlhome01-20251009190001  28.7G      -  2.08T  -
+zlhome01/HOME.cmiranda@zlhome01-20251016190001  15.8G      -  2.08T  -
+zlhome01/HOME.cmiranda@zlhome01-20251023190001  5.25G      -  1.90T  -
+zlhome01/HOME.cmiranda@zlhome01-20251026190002  2.66G      -  1.90T  -
+zlhome01/HOME.cmiranda@zlhome01-20251027190002  2.56G      -  1.91T  -
+zlhome01/HOME.cmiranda@zlhome01-20251028190001  3.17G      -  1.91T  -
+zlhome01/HOME.cmiranda@zlhome01-20251029190001  3.32G      -  1.91T  -
+zlhome01/HOME.cmiranda@zlhome01-20251030190001  2.12G      -  1.91T  -
+zlhome01/HOME.cmiranda@zlhome01-20251031190001  1.61G      -  1.91T  -
+zlhome01/HOME.cmiranda@zlhome01-20251101190001  3.56G      -  1.91T  -
+zlhome01/HOME.cmiranda@zlhome01-20251102190001  4.53G      -  1.91T  -
+zlhome01/HOME.cmiranda@zlhome01-20251103190001  6.58G      -  1.92T  -
+zlhome01/HOME.cmiranda@zlhome01-20251109193804  4.84G      -  1.92T  -
+
 ```
 
 **Target system:**
 ```bash
-ssh zima01 zfs list -t snapshot WD181KFGX/BACKUPS/zlhome01/HOME.cmiranda
+root@lhome01:~# ssh zima01 zfs list -t snapshot WD181KFGX/BACKUPS/zlhome01/HOME.cmiranda
+NAME                                                               USED  AVAIL     REFER  MOUNTPOINT
+WD181KFGX/BACKUPS/zlhome01/HOME.cmiranda@zlhome01-20241115013705  11.1G      -     1.20T  -
+WD181KFGX/BACKUPS/zlhome01/HOME.cmiranda@zlhome01-20241214223058  12.4G      -     1.21T  -
+WD181KFGX/BACKUPS/zlhome01/HOME.cmiranda@zlhome01-20250113180001  10.5G      -     1.26T  -
+WD181KFGX/BACKUPS/zlhome01/HOME.cmiranda@zlhome01-20250211181002  8.57G      -     1.28T  -
+WD181KFGX/BACKUPS/zlhome01/HOME.cmiranda@zlhome01-20250313180811  9.80G      -     1.29T  -
+WD181KFGX/BACKUPS/zlhome01/HOME.cmiranda@zlhome01-20250505185145  5.58G      -     1.64T  -
+WD181KFGX/BACKUPS/zlhome01/HOME.cmiranda@zlhome01-20250512215639  3.99G      -     1.66T  -
+WD181KFGX/BACKUPS/zlhome01/HOME.cmiranda@zlhome01-20250611180001  9.39G      -     1.71T  -
+WD181KFGX/BACKUPS/zlhome01/HOME.cmiranda@zlhome01-20250719180001  6.28G      -     1.71T  -
+WD181KFGX/BACKUPS/zlhome01/HOME.cmiranda@zlhome01-20250810190001  6.42G      -     1.72T  -
+WD181KFGX/BACKUPS/zlhome01/HOME.cmiranda@zlhome01-20250909190001  42.6G      -     2.02T  -
+WD181KFGX/BACKUPS/zlhome01/HOME.cmiranda@zlhome01-20251009190001  29.2G      -     2.08T  -
+WD181KFGX/BACKUPS/zlhome01/HOME.cmiranda@zlhome01-20251016190001  16.1G      -     2.09T  -
+WD181KFGX/BACKUPS/zlhome01/HOME.cmiranda@zlhome01-20251023190001  5.42G      -     1.91T  -
+WD181KFGX/BACKUPS/zlhome01/HOME.cmiranda@zlhome01-20251026190002  2.74G      -     1.91T  -
+WD181KFGX/BACKUPS/zlhome01/HOME.cmiranda@zlhome01-20251027190002  2.60G      -     1.91T  -
+WD181KFGX/BACKUPS/zlhome01/HOME.cmiranda@zlhome01-20251028190001  3.21G      -     1.91T  -
+WD181KFGX/BACKUPS/zlhome01/HOME.cmiranda@zlhome01-20251029190001  3.37G      -     1.91T  -
+WD181KFGX/BACKUPS/zlhome01/HOME.cmiranda@zlhome01-20251030190001  2.20G      -     1.91T  -
+WD181KFGX/BACKUPS/zlhome01/HOME.cmiranda@zlhome01-20251031190001  1.68G      -     1.91T  -
+WD181KFGX/BACKUPS/zlhome01/HOME.cmiranda@zlhome01-20251101190001  3.63G      -     1.91T  -
+WD181KFGX/BACKUPS/zlhome01/HOME.cmiranda@zlhome01-20251102190001  4.62G      -     1.91T  -
+WD181KFGX/BACKUPS/zlhome01/HOME.cmiranda@zlhome01-20251103190001  6.69G      -     1.93T  -
+WD181KFGX/BACKUPS/zlhome01/HOME.cmiranda@zlhome01-20251109193804     0B      -     1.92T  -
 ```
 
 The backup summary report provides an overview of all datasets, snapshots, and operations.
