@@ -26,21 +26,21 @@ A streamlined bash wrapper for zfs-autobackup that focuses on what zfs-autobacku
 ## Architecture Overview
 
 ```
-┌──────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│  SOURCE HOST: lhome01                         REMOTE HOST: zima01                                        │
-│  ┌─────────────────────────┐                  ┌───────────────────────────────────────────────────────┐  │
-│  │  Pool: zpool01          │                  │  WD181KFGX/BACKUPS/                                   │  │
-│  │  ├─ dataset1            │                  │               └─── lhome01/                           │  │
-│  │  │    ├─dataset1@snap1  │  ssh + zfs send  │                        └── zpool01/                   │  │
-│  │  ├─ dataset2            │─────────────────▸│                               ├─ dataset1             │  │
-│  │  │    ├─dataset1@snap1  │                  │                               │    ├─ dataset2@snap1  │  │
-│  │  └─ dataset3            │                  │                               ├─ dataset2             │  │
-│  │       └──dataset1@snap1 │                  │                               │    ├─ dataset2@snap1  │  │
-│  └─────────────────────────┘                  │                               └─ dataset3             │  │
-│                                               │                                    └─ dataset3@snap1  │  │
-│                                               └───────────────────────────────────────────────────────┘  │
-│                                                                                                          │
-└──────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────────────────┐
+│  SOURCE HOST: lhome01                         REMOTE HOST: zima01                        │
+│  ┌─────────────────────────┐                  ┌───────────────────────────────────────┐  │
+│  │  Pool: zpool01          │                  │  WD181KFGX/BACKUPS/                   │  │
+│  │  ├─ dataset1            │                  │     └─── lhome01/                     │  │
+│  │  │    ├─dataset1@snap1  │  ssh + zfs send  │           └── zpool01/                │  │
+│  │  ├─ dataset2            │─────────────────▸│               ├─ dataset1             │  │
+│  │  │    ├─dataset1@snap1  │                  │               │    ├─ dataset2@snap1  │  │
+│  │  └─ dataset3            │                  │               ├─ dataset2             │  │
+│  │       └──dataset1@snap1 │                  │               │    ├─ dataset2@snap1  │  │
+│  └─────────────────────────┘                  │               └─ dataset3             │  │
+│                                               │                    └─ dataset3@snap1  │  │
+│                                               └───────────────────────────────────────┘  │
+│                                                                                          │
+└──────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 The script automatically organizes backups by hostname, preventing pool name collisions when backing up from multiple hosts to the same remote server. **Supports multiple source hosts** backing up to the same remote destination with automatic hierarchical organization.
