@@ -1,4 +1,4 @@
-# ZFS Backup Wrapper (Simplified)
+# ZFS Backup Wrapper
 
 A streamlined bash wrapper for zfs-autobackup that focuses on what zfs-autobackup doesn't provide: structured logging, log rotation, and readable reports.
 
@@ -43,7 +43,7 @@ A streamlined bash wrapper for zfs-autobackup that focuses on what zfs-autobacku
 └──────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-The script automatically organizes backups by hostname, preventing pool name collisions when backing up from multiple hosts to the same remote server. **Supports multiple source hosts** backing up to the same remote destination with automatic hierarchical organization.
+The script automatically organizes backups by hostname, preventing pool name collisions when backing up from multiple hosts to the same remote server. 
 
 > [!IMPORTANT]
 > 📚 **See more examples:** [architecture.md](architecture.md) - Multi-host scenarios, multiple pools, directory structures, and complete backup flow diagrams.
