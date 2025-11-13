@@ -7,6 +7,7 @@ A streamlined bash wrapper for zfs-autobackup that focuses on what zfs-autobacku
 
 ## Table of Contents
 
+- [Architecture Overview](#architecture-overview)
 - [Features](#features)
 - [Prerequisites](#prerequisites)
   - [Install zfs-autobackup](#1-install-zfs-autobackup-debianubuntu-with-root-privileges)
@@ -21,6 +22,31 @@ A streamlined bash wrapper for zfs-autobackup that focuses on what zfs-autobacku
 - [Retention Policy](#retention-policy)
 - [Useful Links](#useful-links)
 - [License](#license)
+
+## Architecture Overview
+
+```
+┌──────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│  SOURCE HOST: lhome01                         REMOTE HOST: zima01                                        │
+│  ┌─────────────────────────┐                  ┌───────────────────────────────────────────────────────┐  │
+│  │  Pool: zpool01          │                  │  WD181KFGX/BACKUPS/                                   │  │
+│  │  ├─ dataset1            │                  │               └─── lhome01/                           │  │
+│  │  │    ├─dataset1@snap1  │  ssh + zfs send  │                        └── zpool01/                   │  │
+│  │  ├─ dataset2            │─────────────────▸│                               ├─ dataset1             │  │
+│  │  │    ├─dataset1@snap1  │                  │                               │    ├─ dataset2@snap1  │  │
+│  │  └─ dataset3            │                  │                               ├─ dataset2             │  │
+│  │       └──dataset1@snap1 │                  │                               │    ├─ dataset2@snap1  │  │
+│  └─────────────────────────┘                  │                               └─ dataset3             │  │
+│                                               │                                    └─ dataset3@snap1  │  │
+│                                               └───────────────────────────────────────────────────────┘  │
+│                                                                                                          │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+The script automatically organizes backups by hostname, preventing pool name collisions when backing up from multiple hosts to the same remote server. **Supports multiple source hosts** backing up to the same remote destination with automatic hierarchical organization.
+
+> [!IMPORTANT]
+> 📚 **See more examples:** [architecture.md](architecture.md) - Multi-host scenarios, multiple pools, directory structures, and complete backup flow diagrams.
 
 ## Features
 
