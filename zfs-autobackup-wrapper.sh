@@ -3,11 +3,17 @@
 # Copyright (c) 2024-2025. All rights reserved.
 #
 # Name: zfs-autobackup-wrapper.sh
-# Version: 1.0.22
+# Version: 1.1.0
 # Author: Mstaaravin
 # Description: Simplified ZFS backup wrapper with efficient logging and monitoring
 #             Focuses on what zfs-autobackup doesn't provide: structured logging,
 #             log rotation, and readable reports.
+#
+# Changelog v1.1.0:
+#   - Fix: Complete BACKUP SUMMARY now written to log files
+#   - Centralized output system ensures log and stdout are identical
+#   - Improved logging consistency across manual and cron executions
+#   - All summary information now appears in both console and log files
 #
 # Changelog v1.0.22:
 #   - Add automatic hostname detection for hierarchical backup organization
@@ -348,9 +354,10 @@ generate_summary_report() {
     # Clean up
     rm -f "${temp_report}"
 
-    # Store pool info for use in main function - will be displayed at the end
+    # Store pool info and logfile path for use in main function - will be displayed at the end
     BACKUP_STATS["${pool},pool_info"]="POOL: ${pool}  |  Remote: ${REMOTE_HOST}  |  Status: ${status}  |  Last backup: $(date '+%Y-%m-%d %H:%M:%S')"
     BACKUP_STATS["${pool},log_file_info"]="Log file: ${logfile}"
+    BACKUP_STATS["${pool},logfile"]="${logfile}"
 }
 
 # Main backup function for a single pool - SIMPLIFIED
@@ -486,7 +493,7 @@ clean_old_logs() {
 # Validates dependencies and pools
 # Processes each pool and handles failures
 main() {
-    log_message "Starting ZFS backup process (v1.0.22)"
+    log_message "Starting ZFS backup process (v1.1.0)"
     log_message "Checking dependencies..."
 
     # Verify dependencies
@@ -522,16 +529,32 @@ main() {
         sleep 5  # Brief pause between pools
     done
 
-    # Final completion message
+    # Final completion message - write to both stdout and all pool logs
     log_message "Backup process completed"
+
+    # Write completion message to each pool's log file
+    for pool in "${POOLS[@]}"; do
+        local pool_logfile="${BACKUP_STATS["${pool},logfile"]}"
+        if [ -n "${pool_logfile}" ] && [ -f "${pool_logfile}" ]; then
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Backup process completed" >> "${pool_logfile}"
+        fi
+    done
+
     echo
 
     # Display pool and log file info for each processed pool
+    # Also write this info to each pool's log file for consistency
     for pool in "${POOLS[@]}"; do
+        local pool_logfile="${BACKUP_STATS["${pool},logfile"]}"
+
         # Display the stored pool info from BACKUP_STATS
         if [ -n "${BACKUP_STATS["${pool},pool_info"]}" ]; then
-            echo "${BACKUP_STATS["${pool},pool_info"]}"
-            echo "${BACKUP_STATS["${pool},log_file_info"]}"
+            # Write to both stdout and the pool's log file
+            {
+                echo
+                echo "${BACKUP_STATS["${pool},pool_info"]}"
+                echo "${BACKUP_STATS["${pool},log_file_info"]}"
+            } | tee -a "${pool_logfile}"
         fi
     done
 
