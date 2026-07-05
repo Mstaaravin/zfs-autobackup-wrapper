@@ -117,7 +117,7 @@ zlhome01/HOME.root           autobackup:zlhome01   true   inherited from zlhome0
 
 ## Configuration
 
-The script ships with generic defaults. Override them in an **optional config file next to the script**, named like the script but with a `.conf` extension (e.g. if deployed as `/root/scripts/backup_zfs.sh`, the config is `/root/scripts/backup_zfs.conf`). This keeps the deployed copy identical to the repo — only the `.conf` differs per host.
+The script contains no site-specific values. All configuration lives in a **required config file next to the script**, named like the script but with a `.conf` extension (e.g. if deployed as `/root/scripts/backup_zfs.sh`, the config is `/root/scripts/backup_zfs.conf`). The script refuses to run without it (and without `REMOTE_POOL_BASEPATH` + `SOURCE_POOLS` set), so the deployed copy stays identical to the repo — only the `.conf` differs per host.
 
 ```bash
 # /root/scripts/backup_zfs.conf — plain bash, sourced by the wrapper

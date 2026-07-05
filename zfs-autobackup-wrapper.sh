@@ -35,23 +35,26 @@
 set -euo pipefail
 
 # ===== Configuration =====
-# Override any of these in an optional config file next to this script,
+# Site-specific settings live in a REQUIRED config file next to this script,
 # named like the script but with .conf extension (e.g. backup_zfs.conf).
-# The .conf file is plain bash, e.g.:
-#   REMOTE_HOST="zima01"
+# The .conf file is plain bash. Minimal example:
+#   REMOTE_HOST="zima01"          # SSH host/IP of backup target; "" = local mode
+#   REMOTE_POOL_BASEPATH="WD181KFGX/HOST"
+#   SOURCE_POOLS=("zlhome01")
 #   HEALTHCHECKS_URL="https://hc-ping.com/<your-uuid>"
+# The script refuses to run without it, so the repo copy stays generic.
 
 # SSH config hostname (~/.ssh/config) or IP of the backup target.
 # Requires SSH key authentication and ZFS permissions on the remote host.
-# Leave EMPTY ("") for local mode: backup to another pool on this same host
+# EMPTY ("") means local mode: backup to another pool on this same host
 # (target is REMOTE_POOL_BASEPATH on the local machine, no SSH involved).
-REMOTE_HOST="pbs01"
-REMOTE_POOL_BASEPATH="WD181KFGX/HOST"
+# NOTE: local mode is a valid setting, so REMOTE_HOST is intentionally NOT
+# part of the required-settings check below.
+REMOTE_HOST=""
+REMOTE_POOL_BASEPATH=""
 
 # Pools to back up when no pool is given on the command line
-SOURCE_POOLS=(
-    "zlhome01"
-)
+SOURCE_POOLS=()
 
 LOG_DIR="/root/logs"
 
@@ -68,8 +71,18 @@ HEALTHCHECKS_URL=""
 
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 CONF_FILE="${SCRIPT_PATH%.sh}.conf"
+if [ ! -f "$CONF_FILE" ]; then
+    echo "Error: config file not found: ${CONF_FILE}" >&2
+    echo "Create it with at least REMOTE_POOL_BASEPATH and SOURCE_POOLS (see header of this script)." >&2
+    exit 1
+fi
 # shellcheck source=/dev/null
-[ -f "$CONF_FILE" ] && source "$CONF_FILE"
+source "$CONF_FILE"
+
+if [ -z "$REMOTE_POOL_BASEPATH" ] || [ ${#SOURCE_POOLS[@]} -eq 0 ]; then
+    echo "Error: REMOTE_POOL_BASEPATH and SOURCE_POOLS must be set in ${CONF_FILE}" >&2
+    exit 1
+fi
 
 # ===== Runtime globals =====
 export PATH="/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
