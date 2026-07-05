@@ -1,570 +1,292 @@
 #!/usr/bin/env bash
 #
-# Copyright (c) 2024-2025. All rights reserved.
+# Copyright (c) 2024-2026. All rights reserved.
 #
 # Name: zfs-autobackup-wrapper.sh
-# Version: 1.1.0
+# Version: 2.0.0
 # Author: Mstaaravin
-# Description: Simplified ZFS backup wrapper with efficient logging and monitoring
-#             Focuses on what zfs-autobackup doesn't provide: structured logging,
-#             log rotation, and readable reports.
+# Description: Thin wrapper around zfs-autobackup (https://github.com/psy0rz/zfs_autobackup)
+#              Adds only what zfs-autobackup deliberately leaves out:
+#              per-run log files, age-based log rotation, a readable summary,
+#              and failure notifications via healthchecks.io.
 #
-# Changelog v1.1.0:
-#   - Fix: Complete BACKUP SUMMARY now written to log files
-#   - Centralized output system ensures log and stdout are identical
-#   - Improved logging consistency across manual and cron executions
-#   - All summary information now appears in both console and log files
-#
-# Changelog v1.0.22:
-#   - Add automatic hostname detection for hierarchical backup organization
-#   - Remote backups now stored as: BASEPATH/hostname/poolname
-#   - Prevents pool name collisions across multiple source hosts
-#   - Auto-create remote hostname dataset if it doesn't exist
-#
-# Changelog v1.0.21:
-#   - Fixed double zero issue in statistics (00 -> 0)
-#   - Simplified snapshot count logic using parameter expansion
-#
-# Changelog v1.0.20:
-#   - Fixed statistics table formatting issue with snapshots_deleted value
-#   - Added newline/carriage return stripping to prevent table breaks
-#
-# Changelog v1.0.19:
-#   - Added final summary output showing pool, remote host, status, and log file
-#   - Improved reporting consistency with remote backup information
-#
-# Changelog v1.0.18:
-#   - Removed redundant check_recent_snapshots() - zfs-autobackup handles this
-#   - Removed complex snapshot categorization - simplified to total counts
-#   - Removed monthly distribution and retention policy displays
-#   - Optimized dataset info collection to single-pass approach
-#   - Reduced script complexity by ~200 lines while maintaining core value
-#   - Performance improvement: 3x fewer zfs command invocations
+# Changelog v2.0.0:
+#   - Full rewrite: ~570 -> ~240 lines
+#   - Removed ASCII table engine; summary is plain `zfs list` with human-readable sizes
+#   - Removed regex parsing of zfs-autobackup output (fragile across upgrades)
+#   - Log rotation is now age-based; logs from failed runs are renamed *_FAILED.log
+#     and kept under a longer retention period
+#   - Added healthchecks.io pings: /start on begin, success or /fail on end,
+#     with a log excerpt as the ping body
+#   - Detects "cannot find common snapshot" failures and logs a remediation hint
+#   - Site configuration can be overridden in an optional <scriptname>.conf file,
+#     so the deployed copy no longer drifts from the repo
+#   - Local mode: REMOTE_HOST="" backs up to another pool on the same host
+#     (no SSH; target is REMOTE_POOL_BASEPATH on the local machine)
 #
 # Usage: ./zfs-autobackup-wrapper.sh [pool_name]
 #
 # Exit codes:
 #   0 - Success
-#   1 - Dependency check failed/Pool validation failed
+#   1 - Dependency or pool validation failure
+#   N - Number of pools that failed to back up
 #
 
-# Ensure script fails on any error
-set -e
+set -euo pipefail
 
-# Enable debug mode for cron troubleshooting
-# set -x
+# ===== Configuration =====
+# Site-specific settings live in a REQUIRED config file next to this script,
+# named like the script but with .conf extension (e.g. backup_zfs.conf).
+# The .conf file is plain bash. Minimal example:
+#   REMOTE_HOST="zima01"          # SSH host/IP of backup target; "" = local mode
+#   REMOTE_POOL_BASEPATH="WD181KFGX/HOST"
+#   SOURCE_POOLS=("zlhome01")
+#   HEALTHCHECKS_URL="https://hc-ping.com/<your-uuid>"
+# The script refuses to run without it, so the repo copy stays generic.
 
-# Global configuration
+# SSH config hostname (~/.ssh/config) or IP of the backup target.
+# Requires SSH key authentication and ZFS permissions on the remote host.
+# EMPTY ("") means local mode: backup to another pool on this same host
+# (target is REMOTE_POOL_BASEPATH on the local machine, no SSH involved).
+# NOTE: local mode is a valid setting, so REMOTE_HOST is intentionally NOT
+# part of the required-settings check below.
+REMOTE_HOST=""
+REMOTE_POOL_BASEPATH=""
 
-# Remote destination - can be either:
-# - SSH config hostname (in ~/.ssh/config, e.g., "zima01")
-# - Direct IP address (e.g., "192.168.1.100")
-# Requires SSH key authentication and ZFS permissions on remote host (normally using root)
-REMOTE_HOST="zima01"
-REMOTE_POOL_BASEPATH="WD181KFGX/BACKUPS"
+# Pools to back up when no pool is given on the command line
+SOURCE_POOLS=()
 
-# Detect local hostname for remote backup organization
-# Creates hierarchical structure: REMOTE_POOL_BASEPATH/hostname/poolname
-LOCAL_HOSTNAME=$(hostname -s)
-
-# Basic logging configuration and date formats
 LOG_DIR="/root/logs"
-DATE=$(date +%Y%m%d_%H%M)                         # Used for filenames (YYYYMMDD)
-TIMESTAMP="[$(date '+%Y-%m-%d %H:%M:%S')]"   # Used for log messages
-START_TIME=$(date +%s)                       # Used for duration calculation
 
-# Function to update timestamp
-update_timestamp() {
-    TIMESTAMP="[$(date '+%Y-%m-%d %H:%M:%S')]"
-}
+# Retention passed to zfs-autobackup (--keep-source / --keep-target)
+KEEP_POLICY="10,1d1w,1w1m,1m6m"
 
-# Ensure PATH includes necessary directories
-export PATH="/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+# Log rotation: plain age-based retention. Logs from failed runs are renamed
+# *_FAILED.log and kept longer so failures stay diagnosable.
+LOG_RETENTION_DAYS=60
+LOG_RETENTION_DAYS_FAILED=365
 
-# Source pools to backup if none specified
-SOURCE_POOLS=(
-    "zlhome01"
-)
+# healthchecks.io ping URL (empty = notifications disabled)
+HEALTHCHECKS_URL=""
 
-# For tracking statistics (simplified)
-declare -A BACKUP_STATS
-declare -A DATASETS_INFO
-declare -a CREATED_SNAPSHOTS
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+CONF_FILE="${SCRIPT_PATH%.sh}.conf"
+if [ ! -f "$CONF_FILE" ]; then
+    echo "Error: config file not found: ${CONF_FILE}" >&2
+    echo "Create it with at least REMOTE_POOL_BASEPATH and SOURCE_POOLS (see header of this script)." >&2
+    exit 1
+fi
+# shellcheck source=/dev/null
+source "$CONF_FILE"
 
-# Logs messages to both syslog and stdout
-# Uses global TIMESTAMP for consistency
-log_message() {
-    update_timestamp
-    echo "${TIMESTAMP} $1" | logger -t zfs-backup
-    echo "${TIMESTAMP} $1"
-}
-
-# Check if running as root
-if [ "$(id -u)" != "0" ]; then
-    log_message "Error: This script must be run as root"
+if [ -z "$REMOTE_POOL_BASEPATH" ] || [ ${#SOURCE_POOLS[@]} -eq 0 ]; then
+    echo "Error: REMOTE_POOL_BASEPATH and SOURCE_POOLS must be set in ${CONF_FILE}" >&2
     exit 1
 fi
 
-# Verifies zfs-autobackup is installed and accessible
+# ===== Runtime globals =====
+export PATH="/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+
+LOCAL_HOSTNAME=$(hostname -s)
+RUN_DATE=$(date +%Y%m%d_%H%M)
+
+declare -a FAILED_POOLS=()
+declare -A POOL_LOG=()
+declare -A POOL_STATUS=()
+
+# ===== Helpers =====
+
+# Run a command on the backup target: via SSH in remote mode, directly in local mode
+target_exec() {
+    if [ -n "$REMOTE_HOST" ]; then
+        ssh "$REMOTE_HOST" "$@"
+    else
+        bash -c "$@"
+    fi
+}
+
+# Human-readable name of the backup target for logs and summaries
+target_name() {
+    echo "${REMOTE_HOST:-local}"
+}
+
+# Log to stdout and syslog with a consistent timestamp
+log() {
+    local msg="[$(date '+%Y-%m-%d %H:%M:%S')] $*"
+    echo "$msg"
+    logger -t zfs-backup -- "$*" 2>/dev/null || true
+}
+
+# Ping healthchecks.io. $1 = endpoint ("" success, "/start", "/fail"),
+# $2 = optional body attached to the ping (shown in the healthchecks.io UI)
+hc_ping() {
+    local endpoint=${1:-} body=${2:-}
+    [ -z "$HEALTHCHECKS_URL" ] && return 0
+    if ! curl -fsS -m 10 --retry 3 --data-raw "$body" \
+            "${HEALTHCHECKS_URL}${endpoint}" >/dev/null 2>&1; then
+        log "WARNING: healthchecks.io ping failed (endpoint: '${endpoint:-success}')"
+    fi
+}
+
 check_dependencies() {
     if ! command -v zfs-autobackup >/dev/null 2>&1; then
-        log_message "Error: zfs-autobackup is not installed"
+        log "Error: zfs-autobackup is not installed"
+        return 1
+    fi
+    if [ -n "$HEALTHCHECKS_URL" ] && ! command -v curl >/dev/null 2>&1; then
+        log "Error: curl is required for healthchecks.io notifications"
         return 1
     fi
     return 0
 }
 
-# Validate if ZFS pool exists and has required properties
 validate_pool() {
     local pool=$1
     if ! zfs list "$pool" >/dev/null 2>&1; then
-        log_message "Error: Pool $pool does not exist"
+        log "Error: Pool $pool does not exist"
         return 1
     fi
-
-    # Verify autobackup property is set
-    if ! zfs get autobackup:${pool} ${pool} | grep -q "true"; then
-        log_message "Error: autobackup:${pool} property not set to true for pool ${pool}"
+    if ! zfs get -H -o value "autobackup:${pool}" "$pool" | grep -q "true"; then
+        log "Error: autobackup:${pool} property not set to true for pool ${pool}"
         return 1
     fi
-
     return 0
 }
 
-# Collect information about datasets - OPTIMIZED single-pass approach
-# Significantly faster than previous multi-pass implementation
-collect_dataset_info() {
-    local pool=$1
-    local temp_file=$(mktemp)
-
-    # Single recursive call to get all datasets and snapshots at once
-    # This replaces multiple individual zfs list calls per dataset
-    zfs list -r -t all -o name,type,used,creation -Hp "${pool}" > "${temp_file}"
-
-    local dataset_count=0
-    local total_snapshots=0
-
-    # Process all data in a single pass
-    while IFS=$'\t' read -r name type used creation; do
-        if [ "${type}" = "filesystem" ] || [ "${type}" = "volume" ]; then
-            # This is a dataset
-            dataset_count=$((dataset_count + 1))
-            DATASETS_INFO["${name},space"]="${used}"
-            DATASETS_INFO["${name},snaps"]=0
-            DATASETS_INFO["${name},last_snap"]="N/A"
-
-        elif [ "${type}" = "snapshot" ]; then
-            # This is a snapshot
-            total_snapshots=$((total_snapshots + 1))
-            local dataset=$(echo "${name}" | cut -d'@' -f1)
-            local snap_name=$(echo "${name}" | cut -d'@' -f2)
-
-            # Increment snapshot count for this dataset
-            local current_count=${DATASETS_INFO["${dataset},snaps"]:-0}
-            DATASETS_INFO["${dataset},snaps"]=$((current_count + 1))
-
-            # Always update last snapshot (file is sorted, so last one wins)
-            DATASETS_INFO["${dataset},last_snap"]="${snap_name}"
-        fi
-    done < "${temp_file}"
-
-    rm -f "${temp_file}"
-
-    BACKUP_STATS["total_datasets"]="${dataset_count}"
-    BACKUP_STATS["total_snapshots"]="${total_snapshots}"
-}
-
-# Parse the output of zfs-autobackup for created and deleted snapshots
-# Counts snapshots from log output
-parse_autobackup_output() {
-    local logfile=$1
-
-    # Count snapshots created
-    # Pattern matches: "[Source] Creating snapshots zlhome01-20250929190001 in pool zlhome01"
-    local created_count=$(grep -c "\[Source\] Creating snapshots.*-[0-9]\{14\} in pool" "${logfile}" 2>/dev/null)
-    created_count=${created_count:-0}
-
-    # Count snapshots deleted (only from Source, not Target)
-    # Pattern matches: "[Source] zlhome01/HOME.cmiranda@zlhome01-20250829214228: Destroying"
-    local deleted_count=$(grep -c "\[Source\].*@.*: Destroying" "${logfile}" 2>/dev/null)
-    deleted_count=${deleted_count:-0}
-
-    BACKUP_STATS["snapshots_created"]="${created_count}"
-    BACKUP_STATS["snapshots_deleted"]="${deleted_count}"
-
-    # Optional: Log the detected counts for debugging
-    log_message "Detected ${created_count} snapshots created and ${deleted_count} snapshots deleted" >> "${logfile}"
-
-    # Populate array for created snapshots (useful for detailed statistics)
-    # Extract snapshot names from creation lines
-    while read -r line; do
-        # Extract the snapshot name pattern: poolname-YYYYMMDDHHMMSS
-        local snap_name=$(echo "${line}" | grep -o '[a-zA-Z0-9_-]\+-[0-9]\{14\}')
-        if [ -n "${snap_name}" ]; then
-            CREATED_SNAPSHOTS+=("${snap_name}")
-        fi
-    done < <(grep "\[Source\] Creating snapshots.*-[0-9]\{14\} in pool" "${logfile}" || true)
-}
-
-# Format time duration from seconds to a human readable format
-format_duration() {
-    local seconds=$1
-    local minutes=$((seconds / 60))
-    local remaining_seconds=$((seconds % 60))
-
-    if [ "${minutes}" -eq 0 ]; then
-        echo "${seconds}s"
-    else
-        echo "${minutes}m ${remaining_seconds}s"
-    fi
-}
-
-# Draw a table header with appropriate column sizes
-draw_table_header() {
-    local col1_width=$1
-    local col2_width=$2
-    local col3_width=$3
-    local col4_width=$4
-
-    printf "+%${col1_width}s+%${col2_width}s+%${col3_width}s+%${col4_width}s+\n" \
-           "$(printf '%0.s-' $(seq 1 $col1_width))" \
-           "$(printf '%0.s-' $(seq 1 $col2_width))" \
-           "$(printf '%0.s-' $(seq 1 $col3_width))" \
-           "$(printf '%0.s-' $(seq 1 $col4_width))"
-
-    printf "| %-$((col1_width-2))s | %-$((col2_width-2))s | %-$((col3_width-2))s | %-$((col4_width-2))s |\n" \
-           "Dataset" "Total Snaps" "Last Snapshot" "Space Used"
-
-    printf "+%${col1_width}s+%${col2_width}s+%${col3_width}s+%${col4_width}s+\n" \
-           "$(printf '%0.s-' $(seq 1 $col1_width))" \
-           "$(printf '%0.s-' $(seq 1 $col2_width))" \
-           "$(printf '%0.s-' $(seq 1 $col3_width))" \
-           "$(printf '%0.s-' $(seq 1 $col4_width))"
-}
-
-# Draw a table row with appropriate column sizes - SIMPLIFIED
-# Removed complex (XM,YW,ZD) breakdown for cleaner output
-draw_table_row() {
-    local dataset=$1
-    local col1_width=$2
-    local col2_width=$3
-    local col3_width=$4
-    local col4_width=$5
-
-    local snaps="${DATASETS_INFO["${dataset},snaps"]}"
-    local last_snap="${DATASETS_INFO["${dataset},last_snap"]}"
-    local space="${DATASETS_INFO["${dataset},space"]}"
-
-    # Truncate dataset name if too long
-    local displayed_dataset="${dataset}"
-    if [ ${#displayed_dataset} -gt $((col1_width-4)) ]; then
-        displayed_dataset="${displayed_dataset:0:$((col1_width-7))}..."
-    fi
-
-    # Truncate last snapshot name if too long
-    if [ ${#last_snap} -gt $((col3_width-4)) ]; then
-        last_snap="${last_snap:0:$((col3_width-7))}..."
-    fi
-
-    printf "| %-$((col1_width-2))s | %-$((col2_width-2))s | %-$((col3_width-2))s | %-$((col4_width-2))s |\n" \
-           "${displayed_dataset}" "${snaps}" "${last_snap}" "${space}"
-}
-
-# Draw statistics table - SIMPLIFIED
-# Removed per-type snapshot counts, focus on essential metrics
-draw_stats_table() {
-    local pool=$1
+# Plain-text summary: datasets with human-readable sizes, snapshot counts, duration
+write_summary() {
+    local pool=$1 status=$2 duration=$3
 
     echo
-    echo "STATISTICS:"
-    printf "+%-24s+%-15s+\n" "$(printf '%0.s-' $(seq 1 24))" "$(printf '%0.s-' $(seq 1 15))"
-    printf "| %-22s | %-13s |\n" "Metric" "Value"
-    printf "+%-24s+%-15s+\n" "$(printf '%0.s-' $(seq 1 24))" "$(printf '%0.s-' $(seq 1 15))"
-
-    printf "| %-22s | %-13s |\n" "Total Datasets" "${BACKUP_STATS["total_datasets"]}"
-    printf "| %-22s | %-13s |\n" "Total Snapshots" "${BACKUP_STATS["total_snapshots"]}"
-    printf "| %-22s | %-13s |\n" "Snapshots Created" "${BACKUP_STATS["snapshots_created"]}"
-    printf "| %-22s | %-13s |\n" "Snapshots Deleted" "${BACKUP_STATS["snapshots_deleted"]}"
-    printf "| %-22s | %-13s |\n" "Operation Duration" "${BACKUP_STATS["duration"]}"
-
-    printf "+%-24s+%-15s+\n" "$(printf '%0.s-' $(seq 1 24))" "$(printf '%0.s-' $(seq 1 15))"
+    echo "===== BACKUP SUMMARY ($(date '+%Y-%m-%d %H:%M:%S')) ====="
+    echo
+    echo "DATASETS:"
+    zfs list -r -t filesystem,volume -o name,used,avail,refer "$pool"
+    echo
+    echo "SNAPSHOTS PER DATASET:"
+    zfs list -r -t snapshot -o name -H "$pool" | awk -F@ '{print $1}' | uniq -c
+    echo
+    echo "Duration: ${duration}"
+    echo
+    echo "POOL: ${pool}  |  Target: $(target_name)  |  Status: ${status}  |  Last backup: $(date '+%Y-%m-%d %H:%M:%S')"
 }
 
-# Generate a detailed summary report - SIMPLIFIED
-# Removed complex categorization and monthly distribution
-generate_summary_report() {
+# Run zfs-autobackup for one pool, logging everything to a per-run file
+backup_pool() {
     local pool=$1
-    local status=$2
-    local logfile=$3
+    local logfile="${LOG_DIR}/${pool}_backup_${RUN_DATE}.log"
+    local pool_start pool_status="✓ COMPLETED"
+    pool_start=$(date +%s)
 
-    # Calculate duration
-    local end_time=$(date +%s)
-    local duration=$((end_time - START_TIME))
-    BACKUP_STATS["duration"]="$(format_duration ${duration})"
+    log "Processing pool: ${pool}" | tee -a "$logfile"
+    log "Log file: ${logfile}" | tee -a "$logfile"
 
-    # Collect dataset information using optimized single-pass approach
-    collect_dataset_info "${pool}"
-
-    # If this was a successful backup, parse the log for additional information
-    if [[ "${status}" == *"COMPLETED"* ]]; then
-        parse_autobackup_output "${logfile}"
-    fi
-
-    # Define table column widths
-    local col1_width=32  # Dataset
-    local col2_width=16  # Total Snaps
-    local col3_width=32  # Last Snapshot
-    local col4_width=15  # Space Used
-
-    # Create a temporary file for the clean report
-    local temp_report=$(mktemp)
-
-    # Generate the clean report to temp file
-    {
-        echo
-        echo "===== BACKUP SUMMARY ($(date '+%Y-%m-%d %H:%M:%S')) ====="
-        echo
-
-        # Print dataset summary table
-        echo "DATASETS SUMMARY:"
-        draw_table_header ${col1_width} ${col2_width} ${col3_width} ${col4_width}
-
-        # List all datasets
-        for dataset in $(zfs list -r -o name -H "${pool}"); do
-            draw_table_row "${dataset}" ${col1_width} ${col2_width} ${col3_width} ${col4_width}
-        done
-
-        printf "+%${col1_width}s+%${col2_width}s+%${col3_width}s+%${col4_width}s+\n" \
-               "$(printf '%0.s-' $(seq 1 $col1_width))" \
-               "$(printf '%0.s-' $(seq 1 $col2_width))" \
-               "$(printf '%0.s-' $(seq 1 $col3_width))" \
-               "$(printf '%0.s-' $(seq 1 $col4_width))"
-
-        # Draw statistics table
-        draw_stats_table "${pool}"
-
-    } > "${temp_report}"
-
-    # Display the clean report on stdout
-    cat "${temp_report}"
-
-    # Append the clean report to logfile
-    cat "${temp_report}" >> "${logfile}"
-
-    # Clean up
-    rm -f "${temp_report}"
-
-    # Store pool info and logfile path for use in main function - will be displayed at the end
-    BACKUP_STATS["${pool},pool_info"]="POOL: ${pool}  |  Remote: ${REMOTE_HOST}  |  Status: ${status}  |  Last backup: $(date '+%Y-%m-%d %H:%M:%S')"
-    BACKUP_STATS["${pool},log_file_info"]="Log file: ${logfile}"
-    BACKUP_STATS["${pool},logfile"]="${logfile}"
-}
-
-# Main backup function for a single pool - SIMPLIFIED
-# Removed redundant recent snapshot check - zfs-autobackup handles this internally
-log_backup() {
-    local pool=$1
-    local logfile="$LOG_DIR/${pool}_backup_${DATE}.log"
-    local temp_error_file=$(mktemp)
-
-    # Start logging from the beginning
-    log_message "Processing pool: $pool" | tee -a "$logfile"
-    log_message "- Starting backup" | tee -a "$logfile"
-    log_message "- Log file: $logfile" | tee -a "$logfile"
-
-    # Ensure remote hostname dataset exists
+    # Ensure target base dataset exists: BASEPATH/hostname (multi-host layout)
     local remote_base="${REMOTE_POOL_BASEPATH}/${LOCAL_HOSTNAME}"
-    if ! ssh "$REMOTE_HOST" "zfs list '$remote_base'" &>/dev/null; then
-        log_message "- Creating remote base dataset: $remote_base" | tee -a "$logfile"
-        if ! ssh "$REMOTE_HOST" "zfs create '$remote_base'"; then
-            log_message "- Failed to create remote base dataset" | tee -a "$logfile"
-            FAILED_POOLS+=("$pool")
-            return 1
+    if ! target_exec "zfs list '$remote_base'" >/dev/null 2>&1; then
+        log "Creating target base dataset: ${remote_base}" | tee -a "$logfile"
+        if ! target_exec "zfs create -p '$remote_base'" 2>&1 | tee -a "$logfile"; then
+            log "ERROR: could not create target base dataset on $(target_name)" | tee -a "$logfile"
+            pool_status="✗ FAILED"
         fi
     fi
 
-    # Execute backup with full output capture
-    # zfs-autobackup will handle --min-change internally and skip if no changes
-    # Remote path includes hostname for multi-host organization: BASEPATH/hostname/poolname
-    if ! zfs-autobackup -v --clear-mountpoint --force --ssh-target "$REMOTE_HOST" "$pool" "$remote_base" > >(tee -a "$logfile") 2> >(tee -a "$temp_error_file" >&2); then
-        log_message "- Backup failed" | tee -a "$logfile"
-        cat "$temp_error_file" | tee -a "$logfile"
-        printf '\n\n' | tee -a "$logfile"
+    # In local mode --ssh-target is omitted and zfs-autobackup writes to a local pool
+    local -a ssh_target_args=()
+    [ -n "$REMOTE_HOST" ] && ssh_target_args=(--ssh-target "$REMOTE_HOST")
 
-        # Generate summary report
-        generate_summary_report "${pool}" "✗ FAILED" "${logfile}"
+    if [ "$pool_status" != "✗ FAILED" ]; then
+        if ! zfs-autobackup -v \
+                --keep-source "$KEEP_POLICY" --keep-target "$KEEP_POLICY" \
+                --clear-mountpoint --force \
+                "${ssh_target_args[@]}" \
+                "$pool" "$remote_base" 2>&1 | tee -a "$logfile"; then
+            pool_status="✗ FAILED"
+        fi
+    fi
+
+    if [ "$pool_status" = "✗ FAILED" ]; then
+        log "Backup FAILED for pool ${pool}" | tee -a "$logfile"
+
+        # Known silent-failure mode: incremental impossible, needs manual action.
+        # Without intervention this will fail on every run from now on.
+        if grep -qi "find common snapshot" "$logfile"; then
+            log "HINT: a dataset has no common snapshot with the target." | tee -a "$logfile"
+            log "HINT: rename or destroy the target dataset on $(target_name) to force a full re-send." | tee -a "$logfile"
+        fi
+    fi
+
+    local duration=$(( $(date +%s) - pool_start ))
+    write_summary "$pool" "$pool_status" "$((duration / 60))m $((duration % 60))s" | tee -a "$logfile"
+
+    if [ "$pool_status" = "✗ FAILED" ]; then
+        local failed_log="${logfile%.log}_FAILED.log"
+        mv "$logfile" "$failed_log"
+        logfile="$failed_log"
         FAILED_POOLS+=("$pool")
-    else
-        log_message "- Backup completed successfully" | tee -a "$logfile"
-        printf '\n' | tee -a "$logfile"
-
-        # Generate summary report
-        generate_summary_report "${pool}" "✓ COMPLETED" "${logfile}"
     fi
 
-    # Add LOG ROTATION section after the backup summary
-    {
-        echo
-        echo "LOG ROTATION:"
-    } | tee -a "$logfile"
-
-    # Clean logs for this pool with output captured
-    clean_old_logs "$pool" | tee -a "$logfile"
-
-    rm -f "$temp_error_file"
+    POOL_LOG["$pool"]="$logfile"
+    POOL_STATUS["$pool"]="$pool_status"
 }
 
-# Removes log files that don't have matching snapshots
-# Only processes logs older than current day
-# UNCHANGED - This function provides genuine value and is kept as-is
-clean_old_logs() {
-    local pool=$1
-    local current_date=$(date +%Y%m%d)
-
-    log_message "Cleaning logs for $pool using match_snapshots policy"
-
-    # Get all snapshots from pool AND all its datasets (recursive search)
-    # Extract dates from 14-digit timestamps, handling various snapshot prefixes
-    local snapshot_dates=$(zfs list -t snapshot -o name -H -r "$pool" |
-                          grep -E "@[a-zA-Z0-9_-]+-[0-9]{14}" |
-                          sed -E "s/.*@[a-zA-Z0-9_-]+-([0-9]{8})[0-9]{6}/\1/" |
-                          sort -u)
-
-    # Count valid extracted dates
-    local snapshot_count=$(echo "$snapshot_dates" | grep -c "^[0-9]\{8\}$" || echo "0")
-    log_message "Found $snapshot_count unique snapshot dates for $pool (recursive search)"
-
-    # Debug: Show sample of extracted dates
-    if [ "$snapshot_count" -gt 0 ]; then
-        log_message "Sample extracted dates: $(echo "$snapshot_dates" | head -5 | tr '\n' ' ')"
-        # Show date range
-        local oldest_date=$(echo "$snapshot_dates" | head -1)
-        local newest_date=$(echo "$snapshot_dates" | tail -1)
-        log_message "Date range: $oldest_date to $newest_date"
-    else
-        log_message "WARNING: No valid snapshot dates found with expected pattern"
-        # Show sample snapshot names for debugging
-        local sample_snapshots=$(zfs list -t snapshot -o name -H -r "$pool" | head -5)
-        log_message "Sample snapshot names found: $sample_snapshots"
-    fi
-
-    # Process each log file
-    local logs_processed=0
-    local logs_removed=0
-    local logs_kept=0
-
-    # Use a safer approach to avoid subshell issues with counters
-    while IFS= read -r logfile; do
-        [ -z "$logfile" ] && continue
-
-        logs_processed=$((logs_processed + 1))
-
-        # Extract the date portion (YYYYMMDD) from the log filename
-        log_date=$(basename "$logfile" | grep -o '[0-9]\{8\}')
-
-        # Skip if no valid date found in filename
-        if [ -z "$log_date" ]; then
-            log_message "WARNING: Could not extract date from log filename: $logfile"
-            continue
-        fi
-
-        # Skip if it's today's log
-        if [ "$log_date" = "$current_date" ]; then
-            log_message "Keeping current day log: $logfile"
-            logs_kept=$((logs_kept + 1))
-            continue
-        fi
-
-        # Check if we have snapshots for this date
-        if echo "$snapshot_dates" | grep -q "^${log_date}$"; then
-            log_message "Keeping log that matches snapshot date $log_date: $logfile"
-            logs_kept=$((logs_kept + 1))
-        else
-            log_message "Removing old log without matching snapshot for date $log_date: $logfile"
-            rm "$logfile"
-            logs_removed=$((logs_removed + 1))
-        fi
-    done < <(find "$LOG_DIR" -name "${pool}_backup_*.log" 2>/dev/null)
-
-    log_message "Log cleanup completed for $pool: processed=$logs_processed, removed=$logs_removed, kept=$logs_kept"
+# Age-based rotation; failed-run logs live under a longer retention
+rotate_logs() {
+    local pool=$1 removed_ok removed_failed
+    removed_ok=$(find "$LOG_DIR" -name "${pool}_backup_*.log" ! -name "*_FAILED.log" \
+                     -mtime +"$LOG_RETENTION_DAYS" -print -delete | wc -l)
+    removed_failed=$(find "$LOG_DIR" -name "${pool}_backup_*_FAILED.log" \
+                     -mtime +"$LOG_RETENTION_DAYS_FAILED" -print -delete | wc -l)
+    log "Log rotation for ${pool}: removed ${removed_ok} logs older than ${LOG_RETENTION_DAYS}d, ${removed_failed} failed-run logs older than ${LOG_RETENTION_DAYS_FAILED}d"
 }
 
-# Main script execution
-# Validates dependencies and pools
-# Processes each pool and handles failures
 main() {
-    log_message "Starting ZFS backup process (v1.1.0)"
-    log_message "Checking dependencies..."
+    log "Starting ZFS backup process (v2.0.0)"
 
-    # Verify dependencies
+    if [ "$(id -u)" != "0" ]; then
+        log "Error: This script must be run as root"
+        exit 1
+    fi
+
     if ! check_dependencies; then
-        log_message "Failed dependency check. Exiting."
         exit 1
     fi
-    log_message "Dependencies OK"
 
-    # Ensure log directory exists
-    mkdir -p "$LOG_DIR" || {
-        log_message "Error: Could not create log directory $LOG_DIR"
-        exit 1
-    }
+    mkdir -p "$LOG_DIR"
 
-    # Array for tracking failed pools
-    declare -a FAILED_POOLS=()
-
-    # Use specified pool or default list
+    local -a pools=()
     if [ $# -eq 1 ]; then
-        if validate_pool "$1"; then
-            POOLS=("$1")
-        else
-            exit 1
-        fi
+        validate_pool "$1" || exit 1
+        pools=("$1")
     else
-        POOLS=("${SOURCE_POOLS[@]}")
+        pools=("${SOURCE_POOLS[@]}")
     fi
 
-    # Process each pool
-    for pool in "${POOLS[@]}"; do
-        log_backup "$pool"
-        sleep 5  # Brief pause between pools
-    done
+    hc_ping "/start" "Backup starting on ${LOCAL_HOSTNAME}: ${pools[*]}"
 
-    # Final completion message - write to both stdout and all pool logs
-    log_message "Backup process completed"
-
-    # Write completion message to each pool's log file
-    for pool in "${POOLS[@]}"; do
-        local pool_logfile="${BACKUP_STATS["${pool},logfile"]}"
-        if [ -n "${pool_logfile}" ] && [ -f "${pool_logfile}" ]; then
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Backup process completed" >> "${pool_logfile}"
-        fi
+    for pool in "${pools[@]}"; do
+        backup_pool "$pool"
+        rotate_logs "$pool" | tee -a "${POOL_LOG[$pool]}"
     done
 
     echo
-
-    # Display pool and log file info for each processed pool
-    # Also write this info to each pool's log file for consistency
-    for pool in "${POOLS[@]}"; do
-        local pool_logfile="${BACKUP_STATS["${pool},logfile"]}"
-
-        # Display the stored pool info from BACKUP_STATS
-        if [ -n "${BACKUP_STATS["${pool},pool_info"]}" ]; then
-            # Write to both stdout and the pool's log file
-            {
-                echo
-                echo "${BACKUP_STATS["${pool},pool_info"]}"
-                echo "${BACKUP_STATS["${pool},log_file_info"]}"
-            } | tee -a "${pool_logfile}"
-        fi
+    for pool in "${pools[@]}"; do
+        echo "POOL: ${pool}  |  Target: $(target_name)  |  Status: ${POOL_STATUS[$pool]}  |  Log: ${POOL_LOG[$pool]}"
     done
 
-    # Report any failures
     if [ ${#FAILED_POOLS[@]} -gt 0 ]; then
-        log_message "WARNING: Some pools failed: ${FAILED_POOLS[*]}"
+        log "WARNING: Some pools failed: ${FAILED_POOLS[*]}"
+        local body="FAILED pools on ${LOCAL_HOSTNAME}: ${FAILED_POOLS[*]}"$'\n\n'
+        for pool in "${FAILED_POOLS[@]}"; do
+            body+="--- last 40 lines of ${POOL_LOG[$pool]} ---"$'\n'
+            body+="$(tail -n 40 "${POOL_LOG[$pool]}")"$'\n\n'
+        done
+        hc_ping "/fail" "$body"
         exit ${#FAILED_POOLS[@]}
     fi
+
+    log "Backup process completed"
+    hc_ping "" "Backup OK on ${LOCAL_HOSTNAME}: ${pools[*]}"
 }
 
-# Run main function with provided arguments
 main "$@"
-exit 0

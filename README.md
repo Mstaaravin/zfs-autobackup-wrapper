@@ -1,6 +1,6 @@
 # ZFS Backup Wrapper
 
-A streamlined bash wrapper for zfs-autobackup that focuses on what zfs-autobackup doesn't provide: structured logging, log rotation, and readable reports.
+A thin bash wrapper for zfs-autobackup that adds only what zfs-autobackup deliberately leaves out: per-run log files, age-based log rotation, a readable summary, and failure notifications via healthchecks.io.
 
 > [!IMPORTANT]
 > This script wraps the zfs-autobackup utility. Install it separately from: https://github.com/psy0rz/zfs_autobackup
@@ -11,9 +11,11 @@ A streamlined bash wrapper for zfs-autobackup that focuses on what zfs-autobacku
 - [Features](#features)
 - [Prerequisites](#prerequisites)
   - [Install zfs-autobackup](#1-install-zfs-autobackup-debianubuntu-with-root-privileges)
-  - [SSH Configuration](#2-ssh-configuration)
+  - [SSH Configuration](#2-ssh-configuration-remote-mode-only)
   - [ZFS Pool Configuration](#3-zfs-pool-configuration)
 - [Configuration](#configuration)
+- [Local Mode (same-host backups)](#local-mode-same-host-backups)
+- [Notifications (healthchecks.io)](#notifications-healthchecksio)
 - [Usage](#usage)
 - [Output Example](#output-example)
 - [Logs](#logs)
@@ -29,7 +31,7 @@ A streamlined bash wrapper for zfs-autobackup that focuses on what zfs-autobacku
 ┌──────────────────────────────────────────────────────────────────────────────────────────┐
 │  SOURCE HOST: lhome01                         REMOTE HOST: zima01                        │
 │  ┌─────────────────────────┐                  ┌───────────────────────────────────────┐  │
-│  │  Pool: zpool01          │                  │  WD181KFGX/BACKUPS/                   │  │
+│  │  Pool: zpool01          │                  │  WD181KFGX/HOST/                      │  │
 │  │  ├─ dataset1            │                  │     └─── lhome01/                     │  │
 │  │  │    ├─dataset1@snap1  │  ssh + zfs send  │           └── zpool01/                │  │
 │  │  ├─ dataset2            │─────────────────▸│               ├─ dataset1             │  │
@@ -43,30 +45,32 @@ A streamlined bash wrapper for zfs-autobackup that focuses on what zfs-autobacku
 └──────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-The script automatically organizes backups by hostname, preventing pool name collisions when backing up from multiple hosts to the same remote server. 
+The script automatically organizes backups by hostname, preventing pool name collisions when backing up from multiple hosts to the same remote server.
+
+It also supports **local mode**: backing up a pool to another pool on the same host, with no SSH involved (see [Local Mode](#local-mode-same-host-backups)).
 
 > [!IMPORTANT]
 > 📚 **See more examples:** [architecture.md](architecture.md) - Multi-host scenarios, multiple pools, directory structures, and complete backup flow diagrams.
 
 ## Features
 
-  - Automated ZFS pool backup with remote replication
+  - Automated ZFS pool backup with remote (SSH) or local (same-host) replication
   - Hierarchical backup organization by hostname (prevents pool name collisions across multiple hosts)
-  - Auto-creates remote destination datasets on first run
-  - Structured logging with timestamps
-  - Automatic log rotation (keeps only logs with matching snapshots)
-  - Clean tabular reports showing datasets, snapshots, and space usage
+  - Auto-creates target base datasets on first run
+  - Per-run log files with timestamps
+  - Age-based log rotation; logs from failed runs are kept longer for diagnosis
+  - Failure notifications via [healthchecks.io](https://healthchecks.io) (start/success/fail pings with log excerpt)
+  - Detects the "cannot find common snapshot" failure mode and logs a remediation hint
+  - Site-specific configuration in a required `.conf` file (the script itself stays fully generic)
   - Support for multiple pools or single pool backup
-  - Performance optimized with minimal ZFS command invocations
-
-
 
 ## Prerequisites
 
 **System Requirements:**
 - Linux with ZFS support (Debian, Ubuntu, or similar)
 - Root or sudo access
-- SSH root access to remote backup server with ZFS installed
+- For remote mode: SSH root access to a backup server with ZFS installed
+- `curl` (only if healthchecks.io notifications are enabled)
 
 ### 1. Install zfs-autobackup (Debian/Ubuntu) with root privileges
 ```bash
@@ -75,8 +79,8 @@ pipx install zfs-autobackup
 pipx ensurepath
 ```
 
-### 2. SSH Configuration
-Create or edit `/root/.ssh/config`: 
+### 2. SSH Configuration (remote mode only)
+Create or edit `/root/.ssh/config`:
 ```
 Host zima01
     HostName 172.16.254.5
@@ -90,20 +94,8 @@ Host zima01
 > The `IPQoS throughput` setting prioritizes data transfer over interactive response, optimizing network packet handling for large backups.
 
 ### 3. ZFS Pool Configuration
-We'll use this pool and its respective datasets as an example.
-```bash
-root@lhome01:~# zfs list
-NAME                        USED  AVAIL  REFER  MOUNTPOINT
-zlhome01                   2.57T   879G    24K  none
-zlhome01/HOME.cmiranda     2.34T   879G  1.92T  /home/cmiranda
-zlhome01/HOME.root         15.7G   879G  3.93G  /root
-zlhome01/etc.libvirt.qemu   640K   879G    65K  /etc/libvirt/qemu
-zlhome01/var.lib.docker     109G   879G  88.5G  /var/lib/docker
-zlhome01/var.lib.incus     17.6G   879G  4.57G  /var/lib/incus
-zlhome01/var.lib.libvirt   90.6G   879G  43.1G  /var/lib/libvirt
-```
 
-Set the autobackup property on each pool on origin server (lhome01):
+Set the autobackup property on each pool on the source server:
 ```bash
 zfs set autobackup:poolname=true poolname
 
@@ -125,36 +117,66 @@ zlhome01/HOME.root           autobackup:zlhome01   true   inherited from zlhome0
 
 ## Configuration
 
-Edit the script variables:
+The script contains no site-specific values. All configuration lives in a **required config file next to the script**, named like the script but with a `.conf` extension (e.g. if deployed as `/root/scripts/backup_zfs.sh`, the config is `/root/scripts/backup_zfs.conf`). The script refuses to run without it (and without `REMOTE_POOL_BASEPATH` + `SOURCE_POOLS` set), so the deployed copy stays identical to the repo — only the `.conf` differs per host.
 
 ```bash
-# Remote destination host (SSH config hostname or IP)
+# /root/scripts/backup_zfs.conf — plain bash, sourced by the wrapper
+
+# Target host (SSH config hostname or IP). Empty string = local mode.
 REMOTE_HOST="zima01"
 
-# Remote pool base path where backups will be stored
-# Backups are organized hierarchically as: BASEPATH/hostname/poolname
-# This prevents pool name collisions across multiple source hosts
-REMOTE_POOL_BASEPATH="WD181KFGX/BACKUPS"
+# Base path on the target pool. Backups land in BASEPATH/hostname/poolname
+REMOTE_POOL_BASEPATH="WD181KFGX/HOST"
 
-# Log directory
+# Source pools to back up when no pool is given on the command line
+SOURCE_POOLS=("zlhome01")
+
+# Log directory and retention
 LOG_DIR="/root/logs"
+LOG_RETENTION_DAYS=60
+LOG_RETENTION_DAYS_FAILED=365
 
-# Source pools to backup when no specific pool is provided
-SOURCE_POOLS=(
-    "zlhome01"
-)
+# Retention passed to zfs-autobackup (--keep-source / --keep-target)
+KEEP_POLICY="10,1d1w,1w1m,1m6m"
+
+# healthchecks.io ping URL (empty = notifications disabled)
+HEALTHCHECKS_URL="https://hc-ping.com/<your-uuid>"
 ```
 
 **Note on REMOTE_HOST:**
-- You can use either an SSH config hostname (e.g., `"zima01"`) or a direct IP address (e.g., `"192.168.1.100"`)
-- **Using an SSH config hostname is recommended** as it leverages the SSH config optimizations (hardware-accelerated ciphers, compression settings, etc.)
-- Using a direct IP address will work but bypasses the SSH config optimizations, resulting in slower transfer speeds
+- You can use either an SSH config hostname (e.g., `"zima01"`) or a direct IP address
+- **Using an SSH config hostname is recommended** as it leverages the SSH config optimizations (hardware-accelerated ciphers, etc.)
+- An **empty string** (`""`) switches to local mode
 
 **Note on Backup Organization:**
 - Backups are automatically organized by hostname: `REMOTE_POOL_BASEPATH/hostname/poolname`
-- Example: Pool `zpool01` from host `lhome01` → `WD181KFGX/BACKUPS/lhome01/zpool01`
-- This prevents collisions when backing up pools with the same name from different hosts
+- Example: Pool `zpool01` from host `lhome01` → `WD181KFGX/HOST/lhome01/zpool01`
 - The hostname is detected automatically using `hostname -s`
+
+## Local Mode (same-host backups)
+
+To back up a pool to **another pool on the same host** (e.g. a second disk), set `REMOTE_HOST=""`:
+
+```bash
+# backup_zfs.conf on zima01: back up zimapool01 to the WD181KFGX pool locally
+REMOTE_HOST=""
+REMOTE_POOL_BASEPATH="WD181KFGX/HOST"
+SOURCE_POOLS=("zimapool01")
+```
+
+In local mode no SSH is involved: `zfs send | zfs recv` runs on the same machine. zfs-autobackup automatically excludes the target path from dataset selection, so the received copies are never re-selected as sources.
+
+## Notifications (healthchecks.io)
+
+If `HEALTHCHECKS_URL` is set, the wrapper pings [healthchecks.io](https://healthchecks.io) (SaaS or self-hosted):
+
+| Ping | When | Meaning |
+|---|---|---|
+| `URL/start` | Backup begins | Run started; healthchecks times the duration |
+| `URL` | All pools succeeded | Success — resets the check timer |
+| `URL/fail` | Any pool failed | Immediate alert; the last 40 log lines are attached as the ping body |
+
+Configure the check with a **daily schedule and a grace period** longer than your worst-case backup duration (e.g. 2–3 hours). This also alerts you when the backup *doesn't run at all* (dead cron, host down) — the failure mode no wrapper can report by itself.
 
 ## Usage
 
@@ -169,70 +191,56 @@ SOURCE_POOLS=(
 ## Output Example
 
 ```
-===== BACKUP SUMMARY (2025-11-11 22:10:43) =====
+===== BACKUP SUMMARY (2026-07-05 06:37:32) =====
 
-DATASETS SUMMARY:
-+--------------------------------+----------------+--------------------------------+---------------+
-| Dataset                        | Total Snaps    | Last Snapshot                  | Space Used    |
-+--------------------------------+----------------+--------------------------------+---------------+
-| zpool01                        | 1              | zpool01-20251111220955         | 146911666     |
-| zpool01/docker                 | 1              | zpool01-20251111220955         | 31372         |
-| zpool01/nextcloud              | 1              | zpool01-20251111220955         | 31372         |
-| zpool01/var.lib.incus          | 1              | zpool01-20251111220955         | 136449104     |
-+--------------------------------+----------------+--------------------------------+---------------+
+DATASETS:
+NAME                        USED  AVAIL  REFER
+zlhome01                   2.80T   640G    24K
+zlhome01/HOME.cmiranda     2.42T   640G   788G
+zlhome01/HOME.root         4.48G   640G   594M
+zlhome01/etc.libvirt.qemu   395K   640G  77.5K
+zlhome01/var.lib.docker    85.2G   640G  85.2G
+zlhome01/var.lib.libvirt    144G   640G   102G
 
-STATISTICS:
-+------------------------+---------------+
-| Metric                 | Value         |
-+------------------------+---------------+
-| Total Datasets         | 4             |
-| Total Snapshots        | 4             |
-| Snapshots Created      | 1             |
-| Snapshots Deleted      | 0             |
-| Operation Duration     | 48s           |
-+------------------------+---------------+
+SNAPSHOTS PER DATASET:
+      1 zlhome01
+     11 zlhome01/HOME.cmiranda
+     13 zlhome01/HOME.root
+     13 zlhome01/etc.libvirt.qemu
+      2 zlhome01/var.lib.docker
+     13 zlhome01/var.lib.libvirt
 
-LOG ROTATION:
-[2025-11-11 22:10:43] Cleaning logs for zpool01 using match_snapshots policy
-[2025-11-11 22:10:43] Found 1 unique snapshot dates for zpool01 (recursive search)
-[2025-11-11 22:10:43] Sample extracted dates: 20251111 
-[2025-11-11 22:10:43] Date range: 20251111 to 20251111
-[2025-11-11 22:10:43] Keeping current day log: /root/logs/zpool01_backup_20251111_2209.log
-[2025-11-11 22:10:43] Keeping current day log: /root/logs/zpool01_backup_20251111_0849.log
-[2025-11-11 22:10:43] Keeping current day log: /root/logs/zpool01_backup_20251111_0847.log
-[2025-11-11 22:10:43] Keeping current day log: /root/logs/zpool01_backup_20251111_2131.log
-[2025-11-11 22:10:43] Keeping current day log: /root/logs/zpool01_backup_20251111_0833.log
-[2025-11-11 22:10:43] Keeping current day log: /root/logs/zpool01_backup_20251111_0907.log
-[2025-11-11 22:10:43] Keeping current day log: /root/logs/zpool01_backup_20251111_2148.log
-[2025-11-11 22:10:43] Keeping current day log: /root/logs/zpool01_backup_20251111_0842.log
-[2025-11-11 22:10:43] Keeping current day log: /root/logs/zpool01_backup_20251111_0834.log
-[2025-11-11 22:10:43] Log cleanup completed for zpool01: processed=9, removed=0, kept=9
-[2025-11-11 22:10:48] Backup process completed
+Duration: 0m 24s
 
-POOL: zpool01  |  Remote: zima01  |  Status: ✓ COMPLETED  |  Last backup: 2025-11-11 22:10:43
-Log file: /root/logs/zpool01_backup_20251111_2209.log
+POOL: zlhome01  |  Target: zima01  |  Status: ✓ COMPLETED  |  Last backup: 2026-07-05 06:37:32
+[2026-07-05 06:37:32] Log rotation for zlhome01: removed 0 logs older than 60d, 0 failed-run logs older than 365d
 
+POOL: zlhome01  |  Target: zima01  |  Status: ✓ COMPLETED  |  Log: /root/logs/zlhome01_backup_20260705_0637.log
+[2026-07-05 06:37:32] Backup process completed
 ```
 
 ## Logs
 
-Logs are stored in `/root/logs/`:
-- Individual pool backup logs: `poolname_backup_YYYYMMDD_HHMM.log`
+Logs are stored in `LOG_DIR` (default `/root/logs/`):
+- Successful runs: `poolname_backup_YYYYMMDD_HHMM.log`
+- Failed runs: `poolname_backup_YYYYMMDD_HHMM_FAILED.log`
 
 ### Log Rotation
-The script automatically removes old logs that don't have matching snapshots, keeping your log directory clean while preserving logs for existing backups.
+Rotation is age-based and runs after every backup:
+- Normal logs are removed after `LOG_RETENTION_DAYS` (default 60 days)
+- Failed-run logs (`*_FAILED.log`) are kept for `LOG_RETENTION_DAYS_FAILED` (default 365 days) so failures stay diagnosable long after the fact
 
 ## Automatic Execution (Crontab)
 
 Add to root's crontab:
 ```bash
-# Run daily at 19:00
-00 19 * * * PATH=$PATH:/root/.local/bin /root/scripts/zfs-autobackup-wrapper.sh > /root/logs/cron_backup.log 2>&1
+# Run daily at 22:30
+30 22 * * * PATH=$PATH:/root/.local/bin /root/scripts/backup_zfs.sh > /root/cron_backup.log 2>&1
 ```
 
 Make the script executable:
 ```bash
-chmod +x /root/scripts/zfs-autobackup-wrapper.sh
+chmod +x /root/scripts/backup_zfs.sh
 ```
 
 ## Verification
@@ -244,90 +252,25 @@ Compare snapshots on source and target:
 
 **Source system:**
 ```bash
-root@lhome01:~# zfs list
-NAME                        USED  AVAIL  REFER  MOUNTPOINT
-zlhome01                   2.57T   873G    24K  none
-zlhome01/HOME.cmiranda     2.34T   873G  1.92T  /home/cmiranda
-zlhome01/HOME.root         15.7G   873G  3.93G  /root
-zlhome01/etc.libvirt.qemu   666K   873G    66K  /etc/libvirt/qemu
-zlhome01/var.lib.docker     109G   873G  88.5G  /var/lib/docker
-zlhome01/var.lib.incus     17.7G   873G  4.59G  /var/lib/incus
-zlhome01/var.lib.libvirt   93.8G   873G  43.5G  /var/lib/libvirt
-
 root@lhome01:~# zfs list -t snapshot -r zlhome01/HOME.cmiranda
-NAME                                             USED  AVAIL  REFER  MOUNTPOINT
-zlhome01/HOME.cmiranda@zlhome01-20250731180001  6.63G      -  1.71T  -
-zlhome01/HOME.cmiranda@zlhome01-20250810190001  5.67G      -  1.71T  -
-zlhome01/HOME.cmiranda@zlhome01-20250909190001  42.0G      -  2.01T  -
-zlhome01/HOME.cmiranda@zlhome01-20251009190001  28.7G      -  2.08T  -
-zlhome01/HOME.cmiranda@zlhome01-20251016190001  15.8G      -  2.08T  -
-zlhome01/HOME.cmiranda@zlhome01-20251023190001  5.25G      -  1.90T  -
-zlhome01/HOME.cmiranda@zlhome01-20251026190002  2.66G      -  1.90T  -
-zlhome01/HOME.cmiranda@zlhome01-20251027190002  2.56G      -  1.91T  -
-zlhome01/HOME.cmiranda@zlhome01-20251028190001  3.17G      -  1.91T  -
-zlhome01/HOME.cmiranda@zlhome01-20251029190001  3.32G      -  1.91T  -
-zlhome01/HOME.cmiranda@zlhome01-20251030190001  2.12G      -  1.91T  -
-zlhome01/HOME.cmiranda@zlhome01-20251031190001  1.61G      -  1.91T  -
-zlhome01/HOME.cmiranda@zlhome01-20251101190001  3.56G      -  1.91T  -
-zlhome01/HOME.cmiranda@zlhome01-20251102190001  4.53G      -  1.91T  -
-zlhome01/HOME.cmiranda@zlhome01-20251103190001  6.58G      -  1.92T  -
-zlhome01/HOME.cmiranda@zlhome01-20251109193804  4.93G      -  1.92T  -
 ```
 
 **Target system:**
 ```bash
-root@lhome01:~# ssh zima01 zfs list -r WD181KFGX/BACKUPS/lhome01
-NAME                                                        USED  AVAIL     REFER  MOUNTPOINT
-WD181KFGX/BACKUPS/lhome01                                  2.98T  2.55T       96K  none
-WD181KFGX/BACKUPS/lhome01/zlhome01                         2.98T  2.55T       96K  none
-WD181KFGX/BACKUPS/lhome01/zlhome01/HOME.cmiranda           2.60T  2.55T     1.92T  /home/cmiranda
-WD181KFGX/BACKUPS/lhome01/zlhome01/HOME.root               15.8G  2.55T     3.94G  /root
-WD181KFGX/BACKUPS/lhome01/zlhome01/etc.libvirt.qemu        2.46M  2.55T      212K  /etc/libvirt/qemu
-WD181KFGX/BACKUPS/lhome01/zlhome01/var.lib.docker           160G  2.55T     89.1G  /var/lib/docker
-WD181KFGX/BACKUPS/lhome01/zlhome01/var.lib.incus           19.5G  2.55T     5.30G  /var/lib/incus
-WD181KFGX/BACKUPS/lhome01/zlhome01/var.lib.libvirt         99.7G  2.55T     47.6G  /var/lib/libvirt
-
-root@lhome01:~# ssh zima01 zfs list -t snapshot -r WD181KFGX/BACKUPS/lhome01/zlhome01/HOME.cmiranda
-NAME                                                                       USED  AVAIL     REFER  MOUNTPOINT
-WD181KFGX/BACKUPS/lhome01/zlhome01/HOME.cmiranda@zlhome01-20241115013705  11.1G      -     1.20T  -
-WD181KFGX/BACKUPS/lhome01/zlhome01/HOME.cmiranda@zlhome01-20241214223058  12.4G      -     1.21T  -
-WD181KFGX/BACKUPS/lhome01/zlhome01/HOME.cmiranda@zlhome01-20250113180001  10.5G      -     1.26T  -
-WD181KFGX/BACKUPS/lhome01/zlhome01/HOME.cmiranda@zlhome01-20250211181002  8.57G      -     1.28T  -
-WD181KFGX/BACKUPS/lhome01/zlhome01/HOME.cmiranda@zlhome01-20250313180811  9.80G      -     1.29T  -
-WD181KFGX/BACKUPS/lhome01/zlhome01/HOME.cmiranda@zlhome01-20250505185145  5.58G      -     1.64T  -
-WD181KFGX/BACKUPS/lhome01/zlhome01/HOME.cmiranda@zlhome01-20250512215639  3.99G      -     1.66T  -
-WD181KFGX/BACKUPS/lhome01/zlhome01/HOME.cmiranda@zlhome01-20250611180001  9.39G      -     1.71T  -
-WD181KFGX/BACKUPS/lhome01/zlhome01/HOME.cmiranda@zlhome01-20250719180001  6.28G      -     1.71T  -
-WD181KFGX/BACKUPS/lhome01/zlhome01/HOME.cmiranda@zlhome01-20250810190001  6.42G      -     1.72T  -
-WD181KFGX/BACKUPS/lhome01/zlhome01/HOME.cmiranda@zlhome01-20250909190001  42.6G      -     2.02T  -
-WD181KFGX/BACKUPS/lhome01/zlhome01/HOME.cmiranda@zlhome01-20251009190001  29.2G      -     2.08T  -
-WD181KFGX/BACKUPS/lhome01/zlhome01/HOME.cmiranda@zlhome01-20251016190001  16.1G      -     2.09T  -
-WD181KFGX/BACKUPS/lhome01/zlhome01/HOME.cmiranda@zlhome01-20251023190001  5.42G      -     1.91T  -
-WD181KFGX/BACKUPS/lhome01/zlhome01/HOME.cmiranda@zlhome01-20251026190002  2.74G      -     1.91T  -
-WD181KFGX/BACKUPS/lhome01/zlhome01/HOME.cmiranda@zlhome01-20251027190002  2.60G      -     1.91T  -
-WD181KFGX/BACKUPS/lhome01/zlhome01/HOME.cmiranda@zlhome01-20251028190001  3.21G      -     1.91T  -
-WD181KFGX/BACKUPS/lhome01/zlhome01/HOME.cmiranda@zlhome01-20251029190001  3.37G      -     1.91T  -
-WD181KFGX/BACKUPS/lhome01/zlhome01/HOME.cmiranda@zlhome01-20251030190001  2.20G      -     1.91T  -
-WD181KFGX/BACKUPS/lhome01/zlhome01/HOME.cmiranda@zlhome01-20251031190001  1.68G      -     1.91T  -
-WD181KFGX/BACKUPS/lhome01/zlhome01/HOME.cmiranda@zlhome01-20251101190001  3.63G      -     1.91T  -
-WD181KFGX/BACKUPS/lhome01/zlhome01/HOME.cmiranda@zlhome01-20251102190001  4.62G      -     1.91T  -
-WD181KFGX/BACKUPS/lhome01/zlhome01/HOME.cmiranda@zlhome01-20251103190001  6.69G      -     1.93T  -
-WD181KFGX/BACKUPS/lhome01/zlhome01/HOME.cmiranda@zlhome01-20251109193804     0B      -     1.92T  -
-
+root@lhome01:~# ssh zima01 zfs list -t snapshot -r WD181KFGX/HOST/lhome01/zlhome01/HOME.cmiranda
 ```
 
-
-The backup summary report provides an overview of all datasets, snapshots, and operations.
+Snapshot names present on both sides should show the same `REFER`; the newest common snapshot is what incremental replication builds on.
 
 ## Retention Policy
 
-zfs-autobackup manages snapshot retention with these default settings:
+The wrapper passes `KEEP_POLICY` (default `10,1d1w,1w1m,1m6m`) to zfs-autobackup as both `--keep-source` and `--keep-target`:
 - Keep the last 10 snapshots
 - Keep every 1 day, delete after 1 week
 - Keep every 1 week, delete after 1 month
-- Keep every 1 month, delete after 1 year
+- Keep every 1 month, delete after 6 months
 
-These are configured in zfs-autobackup itself, not in the wrapper script.
+See the [zfs-autobackup thinning documentation](https://github.com/psy0rz/zfs_autobackup/wiki/Manual) for the schedule syntax.
 
 ## Useful Links
 
