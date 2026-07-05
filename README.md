@@ -61,7 +61,7 @@ It also supports **local mode**: backing up a pool to another pool on the same h
   - Age-based log rotation; logs from failed runs are kept longer for diagnosis
   - Failure notifications via [healthchecks.io](https://healthchecks.io) (start/success/fail pings with log excerpt)
   - Detects the "cannot find common snapshot" failure mode and logs a remediation hint
-  - Site-specific configuration in an optional `.conf` file (the script itself stays generic)
+  - Site-specific configuration in a required `.conf` file (the script itself stays fully generic)
   - Support for multiple pools or single pool backup
 
 ## Prerequisites
