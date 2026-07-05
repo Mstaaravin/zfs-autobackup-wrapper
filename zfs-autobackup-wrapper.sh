@@ -21,6 +21,8 @@
 #   - Detects "cannot find common snapshot" failures and logs a remediation hint
 #   - Site configuration can be overridden in an optional <scriptname>.conf file,
 #     so the deployed copy no longer drifts from the repo
+#   - Local mode: REMOTE_HOST="" backs up to another pool on the same host
+#     (no SSH; target is REMOTE_POOL_BASEPATH on the local machine)
 #
 # Usage: ./zfs-autobackup-wrapper.sh [pool_name]
 #
@@ -41,6 +43,8 @@ set -euo pipefail
 
 # SSH config hostname (~/.ssh/config) or IP of the backup target.
 # Requires SSH key authentication and ZFS permissions on the remote host.
+# Leave EMPTY ("") for local mode: backup to another pool on this same host
+# (target is REMOTE_POOL_BASEPATH on the local machine, no SSH involved).
 REMOTE_HOST="pbs01"
 REMOTE_POOL_BASEPATH="WD181KFGX/HOST"
 
@@ -78,6 +82,20 @@ declare -A POOL_LOG=()
 declare -A POOL_STATUS=()
 
 # ===== Helpers =====
+
+# Run a command on the backup target: via SSH in remote mode, directly in local mode
+target_exec() {
+    if [ -n "$REMOTE_HOST" ]; then
+        ssh "$REMOTE_HOST" "$@"
+    else
+        bash -c "$@"
+    fi
+}
+
+# Human-readable name of the backup target for logs and summaries
+target_name() {
+    echo "${REMOTE_HOST:-local}"
+}
 
 # Log to stdout and syslog with a consistent timestamp
 log() {
@@ -137,7 +155,7 @@ write_summary() {
     echo
     echo "Duration: ${duration}"
     echo
-    echo "POOL: ${pool}  |  Remote: ${REMOTE_HOST}  |  Status: ${status}  |  Last backup: $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "POOL: ${pool}  |  Target: $(target_name)  |  Status: ${status}  |  Last backup: $(date '+%Y-%m-%d %H:%M:%S')"
 }
 
 # Run zfs-autobackup for one pool, logging everything to a per-run file
@@ -150,21 +168,25 @@ backup_pool() {
     log "Processing pool: ${pool}" | tee -a "$logfile"
     log "Log file: ${logfile}" | tee -a "$logfile"
 
-    # Ensure remote base dataset exists: BASEPATH/hostname (multi-host layout)
+    # Ensure target base dataset exists: BASEPATH/hostname (multi-host layout)
     local remote_base="${REMOTE_POOL_BASEPATH}/${LOCAL_HOSTNAME}"
-    if ! ssh "$REMOTE_HOST" "zfs list '$remote_base'" >/dev/null 2>&1; then
-        log "Creating remote base dataset: ${remote_base}" | tee -a "$logfile"
-        if ! ssh "$REMOTE_HOST" "zfs create -p '$remote_base'" 2>&1 | tee -a "$logfile"; then
-            log "ERROR: could not create remote base dataset on ${REMOTE_HOST}" | tee -a "$logfile"
+    if ! target_exec "zfs list '$remote_base'" >/dev/null 2>&1; then
+        log "Creating target base dataset: ${remote_base}" | tee -a "$logfile"
+        if ! target_exec "zfs create -p '$remote_base'" 2>&1 | tee -a "$logfile"; then
+            log "ERROR: could not create target base dataset on $(target_name)" | tee -a "$logfile"
             pool_status="✗ FAILED"
         fi
     fi
+
+    # In local mode --ssh-target is omitted and zfs-autobackup writes to a local pool
+    local -a ssh_target_args=()
+    [ -n "$REMOTE_HOST" ] && ssh_target_args=(--ssh-target "$REMOTE_HOST")
 
     if [ "$pool_status" != "✗ FAILED" ]; then
         if ! zfs-autobackup -v \
                 --keep-source "$KEEP_POLICY" --keep-target "$KEEP_POLICY" \
                 --clear-mountpoint --force \
-                --ssh-target "$REMOTE_HOST" \
+                "${ssh_target_args[@]}" \
                 "$pool" "$remote_base" 2>&1 | tee -a "$logfile"; then
             pool_status="✗ FAILED"
         fi
@@ -177,7 +199,7 @@ backup_pool() {
         # Without intervention this will fail on every run from now on.
         if grep -qi "find common snapshot" "$logfile"; then
             log "HINT: a dataset has no common snapshot with the target." | tee -a "$logfile"
-            log "HINT: rename or destroy the target dataset on ${REMOTE_HOST} to force a full re-send." | tee -a "$logfile"
+            log "HINT: rename or destroy the target dataset on $(target_name) to force a full re-send." | tee -a "$logfile"
         fi
     fi
 
@@ -236,7 +258,7 @@ main() {
 
     echo
     for pool in "${pools[@]}"; do
-        echo "POOL: ${pool}  |  Remote: ${REMOTE_HOST}  |  Status: ${POOL_STATUS[$pool]}  |  Log: ${POOL_LOG[$pool]}"
+        echo "POOL: ${pool}  |  Target: $(target_name)  |  Status: ${POOL_STATUS[$pool]}  |  Log: ${POOL_LOG[$pool]}"
     done
 
     if [ ${#FAILED_POOLS[@]} -gt 0 ]; then
