@@ -211,11 +211,9 @@ SNAPSHOTS PER DATASET:
      13 zlhome01/var.lib.libvirt
 
 Duration: 0m 24s
-
-POOL: zlhome01  |  Target: zima01  |  Status: ✓ COMPLETED  |  Last backup: 2026-07-05 06:37:32
 [2026-07-05 06:37:32] Log rotation for zlhome01: removed 0 logs older than 60d, 0 failed-run logs older than 365d
 
-POOL: zlhome01  |  Target: zima01  |  Status: ✓ COMPLETED  |  Log: /root/logs/zlhome01_backup_20260705_0637.log
+POOL: zlhome01  |  Target: zima01  |  Status: ✓ COMPLETED  |  Last backup: 2026-07-05 06:37:32  |  Log: /root/logs/zlhome01_backup_20260705_0637.log
 [2026-07-05 06:37:32] Backup process completed
 ```
 

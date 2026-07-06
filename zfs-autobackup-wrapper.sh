@@ -167,8 +167,6 @@ write_summary() {
     zfs list -r -t snapshot -o name -H "$pool" | awk -F@ '{print $1}' | uniq -c
     echo
     echo "Duration: ${duration}"
-    echo
-    echo "POOL: ${pool}  |  Target: $(target_name)  |  Status: ${status}  |  Last backup: $(date '+%Y-%m-%d %H:%M:%S')"
 }
 
 # Run zfs-autobackup for one pool, logging everything to a per-run file
@@ -271,7 +269,8 @@ main() {
 
     echo
     for pool in "${pools[@]}"; do
-        echo "POOL: ${pool}  |  Target: $(target_name)  |  Status: ${POOL_STATUS[$pool]}  |  Log: ${POOL_LOG[$pool]}"
+        echo "POOL: ${pool}  |  Target: $(target_name)  |  Status: ${POOL_STATUS[$pool]}  |  Last backup: $(date '+%Y-%m-%d %H:%M:%S')  |  Log: ${POOL_LOG[$pool]}" \
+            | tee -a "${POOL_LOG[$pool]}"
     done
 
     if [ ${#FAILED_POOLS[@]} -gt 0 ]; then
