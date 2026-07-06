@@ -6,7 +6,7 @@ the hostname directory automatically created by the script.
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────────────┐
 │  SOURCE HOST: lhome01                         REMOTE HOST: zima01                                        │
 │  ┌─────────────────────────┐                  ┌───────────────────────────────────────────────────────┐  │
-│  │  Pool: zpool01          │                  │  WD181KFGX/BACKUPS/                                   │  │
+│  │  Pool: zpool01          │                  │  WD181KFGX/HOST/                                      │  │
 │  │  ├─ dataset1            │                  │               └─── lhome01/                           │  │
 │  │  │    ├─dataset1@snap1  │  ssh + zfs send  │                        └── zpool01/                   │  │
 │  │  ├─ dataset2            │─────────────────▸│                               ├─ dataset1             │  │
@@ -29,7 +29,7 @@ organizes backups by hostname, preventing any naming conflicts.
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────────────┐
 │  SOURCE HOST: lhome01           SOURCE HOST: server01          REMOTE HOST: zima01                       │
 │  ┌─────────────────────────┐    ┌─────────────────────────┐    ┌───────────────────────────────────────┐ │
-│  │  Pool: zpool01          │    │  Pool: zpool01          │    │  WD181KFGX/BACKUPS/                   │ │
+│  │  Pool: zpool01          │    │  Pool: zpool01          │    │  WD181KFGX/HOST/                      │ │
 │  │  ├─ dataset1            │    │  ├─ database            │    │    ├─ lhome01/                        │ │
 │  │  │    ├─ dataset1@snap1 │    │  │    ├─ database@snap1 │    │    │   └─ zpool01/  ◄── from lhome01  │ │
 │  │  │    └─ dataset1@snap2 │    │  │    └─ database@snap2 │    │    │        ├─ dataset1               │ │
@@ -52,76 +52,108 @@ organizes backups by hostname, preventing any naming conflicts.
 ```
 
 
+# Local Mode (Same-Host Backup)
+Local setup: With `REMOTE_HOST=""` the target is another pool on the SAME host. No SSH involved —
+`zfs send | zfs recv` runs locally. zfs-autobackup automatically excludes the target path from
+selection, so received copies are never re-selected as sources. The hostname hierarchy is kept,
+so remote and local backups can share the same target pool without collisions.
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────┐
+│  HOST: zima01                                                                      │
+│                                                                                    │
+│  ┌─────────────────────────────┐              ┌─────────────────────────────────┐  │
+│  │  Pool: zimapool01 (source)  │              │  Pool: WD181KFGX (target)       │  │
+│  │  ├─ subvol-101-disk-0       │              │  WD181KFGX/HOST/                │  │
+│  │  │    └─ @zimapool01-...    │   local      │    ├─ zima01/   ◄── local mode  │  │
+│  │  ├─ subvol-104-disk-0       │   zfs send   │    │   └─ zimapool01/           │  │
+│  │  │    └─ @zimapool01-...    │──────────────▸    │        ├─ subvol-101-...   │  │
+│  │  └─ ...                     │   zfs recv   │    │        └─ ...              │  │
+│  └─────────────────────────────┘              │    └─ lhome01/  ◄── via SSH     │  │
+│                                               │        └─ zlhome01/             │  │
+│                                               └─────────────────────────────────┘  │
+└────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+
 # Complete Backup Flow (Single Execution)
-Step-by-step flow: Shows the complete execution process from start to finish, including all checks,
-backup execution, summary generation, and log rotation. Highlights the v1.1.0 improvement where BACKUP
-SUMMARY is written to both console and log file.
+Step-by-step flow for v2.x: config loading, dependency checks, healthchecks.io pings, backup
+execution, plain-text summary, age-based log rotation and final status.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│  BACKUP EXECUTION FLOW                                                      │
+│  BACKUP EXECUTION FLOW (v2.x)                                               │
 │                                                                             │
 │  ┌───────────────────────────────────────────────────────────────┐          │
-│  │ 1. SCRIPT START (on lhome01)                                  │          │
-│  │    ./zfs-autobackup-wrapper.sh                                │          │
+│  │ 1. SCRIPT START                                               │          │
+│  │    /root/scripts/backup_zfs.sh                                │          │
+│  │    └─ Load REQUIRED site config: backup_zfs.conf              │          │
+│  │       (REMOTE_HOST, REMOTE_POOL_BASEPATH, SOURCE_POOLS,       │          │
+│  │        HEALTHCHECKS_URL, retention settings)                  │          │
+│  │       Missing conf or required vars → abort with error        │          │
 │  └───────────────────────────────────────────────────────────────┘          │
 │                                           │                                 │
 │                                           ▼                                 │
 │  ┌───────────────────────────────────────────────────────────────┐          │
-│  │ 2. CHECK DEPENDENCIES                                         │          │
+│  │ 2. CHECKS                                                     │          │
+│  │    ✓ running as root?                                         │          │
 │  │    ✓ zfs-autobackup installed?                                │          │
-│  │    ✓ SSH access to zima01?                                    │          │
-│  │    ✓ Pool exists locally?                                     │          │
+│  │    ✓ curl available? (if healthchecks enabled)                │          │
+│  │    ✓ pool exists + autobackup property set? (pool argument)   │          │
 │  └───────────────────────────────────────────────────────────────┘          │
 │                                           │                                 │
 │                                           ▼                                 │
 │  ┌───────────────────────────────────────────────────────────────┐          │
-│  │ 3. ENSURE REMOTE STRUCTURE                                    │          │
-│  │    ssh zima01 "zfs list WD181KFGX/BACKUPS/lhome01"            │          │
+│  │ 3. NOTIFY START                                               │          │
+│  │    curl HEALTHCHECKS_URL/start                                │          │
+│  └───────────────────────────────────────────────────────────────┘          │
+│                                           │                                 │
+│                                           ▼                                 │
+│  ┌───────────────────────────────────────────────────────────────┐          │
+│  │ 4. ENSURE TARGET STRUCTURE (per pool)                         │          │
+│  │    remote mode: ssh zima01 "zfs list BASEPATH/hostname"       │          │
+│  │    local mode:  zfs list BASEPATH/hostname                    │          │
 │  │    └─ If not exists: auto-create hostname dataset             │          │
 │  └───────────────────────────────────────────────────────────────┘          │
 │                                           │                                 │
 │                                           ▼                                 │
 │  ┌───────────────────────────────────────────────────────────────┐          │
-│  │ 4. EXECUTE BACKUP                                             │          │
-│  │    zfs-autobackup -v --clear-mountpoint --force \             │          │
-│  │      --ssh-target zima01 zpool01 WD181KFGX/BACKUPS/lhome01    │          │
+│  │ 5. EXECUTE BACKUP (per pool)                                  │          │
+│  │    zfs-autobackup -v --keep-source/--keep-target KEEP_POLICY  │          │
+│  │      --clear-mountpoint --force [--ssh-target HOST]           │          │
+│  │      pool BASEPATH/hostname                                   │          │
 │  │                                                               │          │
-│  │    Output written to:                                         │          │
-│  │    ✓ STDOUT (console)                                         │          │
-│  │    ✓ /root/logs/zpool01_backup_20251112_2132.log              │          │
+│  │    Output → console + /root/logs/pool_backup_YYYYMMDD_HHMM.log│          │
+│  │    On failure: detect "cannot find common snapshot" and log   │          │
+│  │    a remediation hint; log renamed *_FAILED.log               │          │
 │  └───────────────────────────────────────────────────────────────┘          │
 │                                           │                                 │
 │                                           ▼                                 │
 │  ┌───────────────────────────────────────────────────────────────┐          │
-│  │ 5. GENERATE BACKUP SUMMARY                                    │          │
-│  │    ===== BACKUP SUMMARY =====                                 │          │
-│  │    DATASETS SUMMARY:                                          │          │
-│  │    +----------------+------------+----------------------+     │          │
-│  │    | Dataset        | Snapshots  | Last Snapshot        |     │          │
-│  │    +----------------+------------+----------------------+     │          │
-│  │    | zpool01        | 1          | @...20251111...      |     │          │
-│  │    | zpool01/docker | 2          | @...20251112...      |     │          │
-│  │    +----------------+------------+----------------------+     │          │
-│  │                                                               │          │
+│  │ 6. BACKUP SUMMARY (plain zfs list, human-readable sizes)      │          │
+│  │    DATASETS: name / used / avail / refer                      │          │
+│  │    SNAPSHOTS PER DATASET: counts                              │          │
+│  │    Duration                                                   │          │
 │  │    Written to BOTH: ✓ Console  ✓ Log file                     │          │
 │  └───────────────────────────────────────────────────────────────┘          │
 │                                           │                                 │
 │                                           ▼                                 │
 │  ┌───────────────────────────────────────────────────────────────┐          │
-│  │ 6. LOG ROTATION                                               │          │
-│  │    - Keep logs matching snapshot dates                        │          │
-│  │    - Keep today's log                                         │          │
-│  │    - Remove orphaned logs (no matching snapshots)             │          │
+│  │ 7. LOG ROTATION (age-based)                                   │          │
+│  │    - Normal logs: removed after LOG_RETENTION_DAYS (60d)      │          │
+│  │    - *_FAILED.log: kept LOG_RETENTION_DAYS_FAILED (365d)      │          │
 │  └───────────────────────────────────────────────────────────────┘          │
 │                                           │                                 │
 │                                           ▼                                 │
 │  ┌───────────────────────────────────────────────────────────────┐          │
-│  │ 7. FINAL STATUS                                               │          │
-│  │    POOL: zpool01  |  Remote: zima01  |  Status: ✓ COMPLETED   │          │
-│  │    Log file: /root/logs/zpool01_backup_20251112_2132.log      │          │
+│  │ 8. FINAL STATUS + NOTIFY RESULT                               │          │
+│  │    POOL: zpool01 | Target: zima01 | Status: ✓ COMPLETED       │          │
+│  │      | Last backup: ... | Log: /root/logs/...                 │          │
 │  │                                                               │          │
-│  │    Written to BOTH: ✓ Console  ✓ Log file                     │          │
+│  │    all pools OK → curl HEALTHCHECKS_URL        (success)      │          │
+│  │    any failed   → curl HEALTHCHECKS_URL/fail                  │          │
+│  │                   (body: last 40 log lines)                   │          │
+│  │    exit code = number of failed pools                         │          │
 │  └───────────────────────────────────────────────────────────────┘          │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
